@@ -277,7 +277,6 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
 
     @objc func showScratchpad(_ sender: Any?) {
         scratchpadWC.toggle()
-        fputs("[scratchpad] toggled; window visible=\(scratchpadWC.window?.isVisible == true)\n", stderr)
     }
 
     // MARK: - Highlighters
@@ -299,9 +298,8 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         }
         sender.state = .on
 
-        // Persist the chosen MIB and log for runtime verification.
+        // Persist the chosen MIB.
         AppPreferences.shared.defaultEncodingMib = mib
-        fputs("[encoding] changeEncoding: mib=\(mib) title='\(sender.title)'\n", stderr)
 
         // Update the status bar encoding field.
         tabController.statusBar?.updateEncoding(mib == -1 ? "Auto" : sender.title)
@@ -363,7 +361,6 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     @objc func showPreferences(_ sender: Any?) {
         preferencesWC.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
-        fputs("[prefs] showPreferences called; window visible=\(preferencesWC.window?.isVisible == true)\n", stderr)
     }
 
     // MARK: - NSMenuItemValidation

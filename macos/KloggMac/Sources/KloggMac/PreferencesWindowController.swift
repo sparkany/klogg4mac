@@ -113,7 +113,6 @@ final class PreferencesWindowController: NSWindowController {
         loadValues()
         wireActions()
 
-        fputs("[prefs] PreferencesWindowController initialized\n", stderr)
     }
 
     // MARK: - Tab builders
@@ -312,12 +311,10 @@ final class PreferencesWindowController: NSWindowController {
         case resultsCacheCheck:  p.useSearchResultsCache  = on
         default: break
         }
-        fputs("[prefs] setting changed: \(sender.title) = \(on)\n", stderr)
     }
 
     @objc private func regexpTypeChanged(_ sender: NSSegmentedControl) {
         AppPreferences.shared.mainRegexpType = sender.selectedSegment
-        fputs("[prefs] mainRegexpType = \(sender.selectedSegment)\n", stderr)
     }
 
     @objc private func textChanged(_ sender: NSTextField) {
