@@ -419,5 +419,13 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
             return true
         }
     }
+
+    // MARK: - Self-test hooks (headless QA; see SelfTest.swift / `--selftest`)
+
+    /// Number of open tabs — used by the headless behavior tests.
+    var selfTestTabCount: Int { tabController._tabs.count }
+
+    /// The window's toolbar (for headless toolbar-state auditing).
+    var selfTestToolbar: NSToolbar? { window?.toolbar }
 }
 
