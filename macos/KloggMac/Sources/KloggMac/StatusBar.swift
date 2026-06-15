@@ -113,6 +113,11 @@ final class StatusBarView: NSView {
         encodingField.stringValue = encoding ?? ""
     }
 
+    /// Called by MainWindowController when the user picks an encoding from the menu.
+    func updateEncoding(_ name: String) {
+        encodingField.stringValue = name
+    }
+
     /// Called by TabController on selection changes (shows current line / column).
     func updatePosition(line: Int?, column: Int?) {
         guard let ln = line else { return }

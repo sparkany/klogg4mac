@@ -20,6 +20,12 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     private let tabController = TabController()
     private let toolbar = AppToolbar()
 
+    // Wave 4 dialog controllers — created lazily on first use.
+    private lazy var highlightersWC       = HighlightersWindowController()
+    private lazy var predefinedFiltersWC  = PredefinedFiltersWindowController()
+    private lazy var scratchpadWC         = ScratchpadWindowController()
+    private lazy var preferencesWC        = PreferencesWindowController()
+
     // MARK: - Init
 
     init() {
@@ -265,23 +271,50 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     // MARK: - Tools menu actions
 
     @objc func editPredefinedFilters(_ sender: Any?) {
-        // TODO(Phase 4): predefined filters dialog
+        predefinedFiltersWC.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc func showScratchpad(_ sender: Any?) {
-        // TODO(Phase 4): scratchpad panel
+        scratchpadWC.toggle()
+        fputs("[scratchpad] toggled; window visible=\(scratchpadWC.window?.isVisible == true)\n", stderr)
     }
 
     // MARK: - Highlighters
 
     @objc func editHighlighters(_ sender: Any?) {
-        // TODO(Phase 4): highlighters dialog
+        highlightersWC.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // MARK: - Encoding
 
-    @objc func changeEncoding(_ sender: Any?) {
-        // TODO(Phase 4): change file encoding
+    @objc func changeEncoding(_ sender: NSMenuItem) {
+        let mib = sender.tag   // -1 = auto, 0 = system default, >0 = MIB number
+
+        // Update check marks: clear the top-level Encoding menu items,
+        // then walk into any submenus to uncheck those too.
+        if let topMenu = NSApp.mainMenu?.item(withTitle: "Encoding")?.submenu {
+            uncheckAll(in: topMenu)
+        }
+        sender.state = .on
+
+        // Persist the chosen MIB and log for runtime verification.
+        AppPreferences.shared.defaultEncodingMib = mib
+        fputs("[encoding] changeEncoding: mib=\(mib) title='\(sender.title)'\n", stderr)
+
+        // Update the status bar encoding field.
+        tabController.statusBar?.updateEncoding(mib == -1 ? "Auto" : sender.title)
+
+        // TODO(Phase 5): re-index the current file with the chosen encoding via engine.
+    }
+
+    /// Recursively clear .on state from all items in a menu (including submenus).
+    private func uncheckAll(in menu: NSMenu) {
+        for item in menu.items {
+            item.state = .off
+            if let sub = item.submenu { uncheckAll(in: sub) }
+        }
     }
 
     // MARK: - Favorites
@@ -328,11 +361,9 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     }
 
     @objc func showPreferences(_ sender: Any?) {
-        // TODO(Phase 4): preferences dialog
-        let alert = NSAlert()
-        alert.messageText = "Not yet implemented"
-        alert.informativeText = "Preferences dialog is planned for Phase 4."
-        alert.runModal()
+        preferencesWC.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        fputs("[prefs] showPreferences called; window visible=\(preferencesWC.window?.isVisible == true)\n", stderr)
     }
 
     // MARK: - NSMenuItemValidation

@@ -88,12 +88,12 @@ final class AppMenu {
 
         menu.addItem(.separator())
 
-        // Preferences — routes to the system Preferences role automatically.
+        // Preferences
         let prefs = menu.addItem(
             withTitle: "Preferences…",
             action: #selector(MainWindowController.showPreferences(_:)),
             keyEquivalent: ",")
-        prefs.target = nil  // TODO(Phase 4): preferences dialog
+        prefs.target = nil
 
         menu.addItem(.separator())
 
@@ -345,23 +345,21 @@ final class AppMenu {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Tools")
 
-        // Predefined Filters — TODO Phase 4
-        let filters = menu.addItem(
+        // Predefined Filters
+        menu.addItem(
             withTitle: "Predefined Filters…",
             action: #selector(MainWindowController.editPredefinedFilters(_:)),
             keyEquivalent: "")
-        filters.target = nil
-        filters.isEnabled = false   // TODO(Phase 4)
+            .target = nil
 
         menu.addItem(.separator())
 
-        // Scratchpad — TODO Phase 4
-        let scratch = menu.addItem(
+        // Scratchpad (toggle show/hide)
+        menu.addItem(
             withTitle: "Scratchpad",
             action: #selector(MainWindowController.showScratchpad(_:)),
             keyEquivalent: "")
-        scratch.target = nil
-        scratch.isEnabled = false   // TODO(Phase 4)
+            .target = nil
 
         item.submenu = menu
         return item
@@ -373,40 +371,105 @@ final class AppMenu {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Highlighters")
 
-        let editHL = menu.addItem(
+        menu.addItem(
             withTitle: "Edit Highlighters…",
             action: #selector(MainWindowController.editHighlighters(_:)),
             keyEquivalent: "")
-        editHL.target = nil
-        editHL.isEnabled = false   // TODO(Phase 4)
+            .target = nil
 
         item.submenu = menu
         return item
     }
 
     // MARK: - Encoding menu
+    //
+    // Mirrors klogg's EncodingMenu::generate() (src/ui/include/encodings.h).
+    // Groups and MIB numbers are taken verbatim from supportedEncodings().
+    // Each item carries its MIB as tag (or -1 for Auto Detect) so
+    // MainWindowController.changeEncoding(_:) can read and persist it.
+    //
+    // MIB → codec name mapping (IANA / QTextCodec reference):
+    //   106=UTF-8, 1013=UTF-16LE, 1014=UTF-16BE, 1018=UTF-32LE, 1019=UTF-32BE
+    //   82=ISO-8859-6(Arabic), 2256=Windows-1256
+    //   7=ISO-8859-4(Baltic), 109=ISO-8859-13, 2257=Windows-1257
+    //   110=ISO-8859-14(Celtic)
+    //   8=ISO-8859-5(Cyrillic), 2084=KOI8-R, 2088=KOI8-U, 2027=macintosh-cyrillic,
+    //   2086=CP866, 2251=Windows-1251
+    //   2250=Windows-1250(Central European)
+    //   2026=Big5(Chinese Trad.), 2025=GBK/GB2312(Chinese Simp.)
+    //   5=ISO-8859-2(Eastern European)
+    //   10=ISO-8859-7(Greek), 2253=Windows-1253
+    //   85=ISO-8859-8(Hebrew), 2255=Windows-1255
+    //   17=Shift-JIS, 18=EUC-JP, 39=ISO-2022-JP
+    //   -949=EUC-KR(pseudo, Apple), 38=EUC-KR
+    //   2259=TIS-620(Thai)
+    //   6=ISO-8859-3(Turkish), 12=ISO-8859-9, 2254=Windows-1254
+    //   3=US-ASCII, 4=ISO-8859-1, 111=ISO-8859-15, 2009=CP850, 2252=Windows-1252
+    //   2258=Windows-1258(Vietnamese)
+
+    private static let encodingGroups: [(String, [(Int, String)])] = [
+        ("Unicode",           [(106, "UTF-8"), (1013, "UTF-16 LE"), (1014, "UTF-16 BE"),
+                               (1018, "UTF-32 LE"), (1019, "UTF-32 BE")]),
+        ("Arabic",            [(82, "ISO-8859-6"), (2256, "Windows-1256")]),
+        ("Baltic",            [(7, "ISO-8859-4"), (109, "ISO-8859-13"), (2257, "Windows-1257")]),
+        ("Celtic",            [(110, "ISO-8859-14")]),
+        ("Cyrillic",          [(8, "ISO-8859-5"), (2084, "KOI8-R"), (2088, "KOI8-U"),
+                               (2086, "CP866"), (2251, "Windows-1251")]),
+        ("Central European",  [(2250, "Windows-1250")]),
+        ("Chinese",           [(2026, "Big5"), (2025, "GBK / GB2312")]),
+        ("Eastern European",  [(5, "ISO-8859-2")]),
+        ("Greek",             [(10, "ISO-8859-7"), (2253, "Windows-1253")]),
+        ("Hebrew",            [(85, "ISO-8859-8"), (2255, "Windows-1255")]),
+        ("Japanese",          [(17, "Shift-JIS"), (18, "EUC-JP"), (39, "ISO-2022-JP")]),
+        ("Korean",            [(38, "EUC-KR")]),
+        ("Thai",              [(2259, "TIS-620")]),
+        ("Turkish",           [(6, "ISO-8859-3"), (12, "ISO-8859-9"), (2254, "Windows-1254")]),
+        ("Western European",  [(4, "ISO-8859-1"), (111, "ISO-8859-15"),
+                               (2252, "Windows-1252"), (2009, "CP850")]),
+        ("Vietnamese",        [(2258, "Windows-1258")]),
+    ]
 
     private static func encodingMenuItem() -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Encoding")
 
-        // Auto-detect (checked by default)
+        // Auto Detect (MIB = -1, tag = -1)
         let auto = menu.addItem(
             withTitle: "Auto Detect",
             action: #selector(MainWindowController.changeEncoding(_:)),
             keyEquivalent: "")
         auto.target = nil
-        auto.state = .on
-        auto.isEnabled = false   // TODO(Phase 4)
+        auto.tag    = -1
+        auto.state  = (AppPreferences.shared.defaultEncodingMib < 0) ? .on : .off
 
         menu.addItem(.separator())
-        for enc in ["UTF-8", "UTF-16", "Latin-1 (ISO 8859-1)", "Windows-1252"] {
-            let encItem = menu.addItem(
-                withTitle: enc,
-                action: #selector(MainWindowController.changeEncoding(_:)),
-                keyEquivalent: "")
-            encItem.target = nil
-            encItem.isEnabled = false   // TODO(Phase 4)
+
+        // System encoding shortcut (shows system locale encoding as a convenience item)
+        let sysItem = menu.addItem(
+            withTitle: "System Default",
+            action: #selector(MainWindowController.changeEncoding(_:)),
+            keyEquivalent: "")
+        sysItem.target = nil
+        sysItem.tag    = 0   // tag=0 → "system default" sentinel
+
+        menu.addItem(.separator())
+
+        // Grouped encoding submenus
+        let mib = AppPreferences.shared.defaultEncodingMib
+        for (groupName, encodings) in encodingGroups {
+            let subItem = NSMenuItem(title: groupName, action: nil, keyEquivalent: "")
+            let subMenu = NSMenu(title: groupName)
+            for (mibNum, encName) in encodings {
+                let it = subMenu.addItem(
+                    withTitle: encName,
+                    action: #selector(MainWindowController.changeEncoding(_:)),
+                    keyEquivalent: "")
+                it.target = nil
+                it.tag    = mibNum
+                it.state  = (mib == mibNum) ? .on : .off
+            }
+            subItem.submenu = subMenu
+            menu.addItem(subItem)
         }
 
         item.submenu = menu
