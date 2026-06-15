@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>klogg</string>
+	<key>CFBundleDisplayName</key>
+	<string>klogg</string>
+	<key>CFBundleExecutable</key>
+	<string>KloggMac</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.klogg.mac</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<!-- CFBundleShortVersionString / CFBundleVersion are injected by build_app.sh
+	     from build-arm64/generated/version.h (KLOGG_VERSION). -->
+	<key>CFBundleShortVersionString</key>
+	<string>24.11.0</string>
+	<key>CFBundleVersion</key>
+	<string>24.11.0.0</string>
+	<key>CFBundleIconFile</key>
+	<string>klogg.icns</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>klogg is distributed under the GNU GPL v3.</string>
+	<!-- Document types so Finder "Open With" and drag-onto-icon work for logs. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Log File</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.log</string>
+				<string>public.plain-text</string>
+				<string>public.text</string>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

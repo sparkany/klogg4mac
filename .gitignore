@@ -65,3 +65,5 @@ website/resources/
 /build-arm64/
 macos/KloggMac/.build/
 macos/*.png
+macos/build/
+*.dmg
