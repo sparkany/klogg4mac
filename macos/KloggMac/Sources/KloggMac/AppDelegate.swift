@@ -12,11 +12,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: MainWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        FileHandle.standardError.write("[verify] didFinishLaunching args=\(CommandLine.arguments)\n".data(using: .utf8)!)
         installMainMenu()
         let wc = MainWindowController()
         wc.showWindow(nil)
         windowController = wc
         NSApp.activate(ignoringOtherApps: true)
+
+        // Open a file passed on the command line: `KloggMac <path>`.
+        if let path = CommandLine.arguments.dropFirst().first(where: { !$0.hasPrefix("-") }),
+           FileManager.default.fileExists(atPath: path) {
+            wc.openFile(path: path)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

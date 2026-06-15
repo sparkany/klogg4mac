@@ -2,106 +2,251 @@
 //  KloggBridge.mm
 //  Objective-C++ implementation of the engine facade.
 //
-//  Two compile modes:
-//    * KLOGG_BRIDGE_STUB defined  -> no Qt/engine; serves synthetic content so the
-//      AppKit UI can be built and verified before the engine is wired in.
-//    * not defined                -> includes the real klogg engine headers and
-//      drives LogData / LogFilteredData. (Filled in once libklogg_engine.a builds;
-//      requires Qt6 Core + Core5Compat — see macos/README.md.)
+//  Drives the real klogg C++ engine (LogData / AbstractLogData) and bridges
+//  Qt signals to Cocoa Foundation callbacks on the main thread.
+//
+//  Threading model
+//  ---------------
+//  Qt requires a QCoreApplication and an event loop to deliver queued-
+//  connection signals between threads. We spin one up on a dedicated
+//  background NSThread (gQtThread) at first KloggEngine init. LogData
+//  objects are created on that thread; their worker-thread signals reach the
+//  Qt event loop there and are then forwarded via dispatch_async to the
+//  Cocoa main queue before invoking the KloggEngineDelegate.
+//
+//  Signal connections use the functor/lambda overload with an explicit
+//  context QObject* so that Qt can deliver the call on the Qt thread without
+//  needing Q_OBJECT / MOC on any helper class we define here.
+//
+//  TODO(Phase 3): searchWithPattern -- not yet wired to LogFilteredData.
+//        Returns 0 matches via delegate immediately.
 //
 
 #import "KloggBridge.h"
 
-#if !defined(KLOGG_BRIDGE_STUB)
-// Real engine wiring goes here. Kept behind the flag so stub builds stay Qt-free.
-//   #include "logdata.h"
-//   #include "logfiltereddata.h"
-//   ... own LogData*/LogFilteredData*, connect signals, hop to main queue ...
-#error "Real engine mode not yet wired. Build with KLOGG_BRIDGE_STUB (see README) until libklogg_engine.a is available."
-#endif
+#include <atomic>
+#include <memory>
+#include <mutex>
+
+// Qt
+#include <QCoreApplication>
+#include <QMetaObject>
+#include <QThread>
+#include <QObject>
+#include <QString>
+
+// klogg engine
+#include "logdata.h"
+#include "abstractlogdata.h"
+#include "linetypes.h"
+#include "loadingstatus.h"
+#include "configuration.h"
+#include "persistentinfo.h"
+
+// PersistentInfo::ForcePortable must be defined exactly once in the app binary.
+// In klogg's main.cpp it is set based on the build type; for KloggMac we
+// always use the OS-standard settings location (~/Library/Preferences/…).
+const bool PersistentInfo::ForcePortable = false;
+
+// ---------------------------------------------------------------------------
+// Qt application singleton -- created once per process on its own thread
+// ---------------------------------------------------------------------------
+
+static int   g_argc = 1;
+static char* g_argv[] = { (char*)"KloggMac", nullptr };
+
+static NSThread*         gQtThread = nil;
+static std::once_flag    gQtStartFlag;
+static std::atomic<bool> gQtReady{false};
+
+@interface _KloggQtRunner : NSObject
+@end
+@implementation _KloggQtRunner
+- (void)run {
+    QCoreApplication app(g_argc, g_argv);
+    // Initialise the Configuration singleton with defaults / saved prefs.
+    // This must happen before the first LogData is constructed.
+    Configuration::getSynced();
+    gQtReady.store(true, std::memory_order_release);
+    app.exec();   // blocks; drives the Qt event loop
+}
+@end
+
+/// Ensure the Qt event-loop thread is started; blocks until exec() is running.
+static void ensureQtStarted()
+{
+    std::call_once(gQtStartFlag, [] {
+        _KloggQtRunner* runner = [_KloggQtRunner new];
+        gQtThread = [[NSThread alloc] initWithTarget:runner
+                                            selector:@selector(run)
+                                              object:nil];
+        gQtThread.name = @"KloggQtEventLoop";
+        [gQtThread start];
+    });
+    while (!gQtReady.load(std::memory_order_acquire))
+        [NSThread sleepForTimeInterval:0.001];
+}
+
+// ---------------------------------------------------------------------------
+// Internal engine holder (C++ struct, lives on gQtThread)
+// ---------------------------------------------------------------------------
+
+struct KloggEngineImpl {
+    std::unique_ptr<QObject>  context;   // context object, Qt-thread-affine
+    std::unique_ptr<LogData>  logData;
+};
+
+// ---------------------------------------------------------------------------
+// KloggEngine -- Objective-C class
+// ---------------------------------------------------------------------------
 
 @implementation KloggEngine {
-    NSMutableArray<NSString *> *_lines;   // stub backing store
+    KloggEngineImpl* _impl;   // heap-allocated; created/destroyed on Qt thread
 }
 
-+ (BOOL)isStub {
-#if defined(KLOGG_BRIDGE_STUB)
-    return YES;
-#else
-    return NO;
-#endif
-}
++ (BOOL)isStub { return NO; }
 
 - (instancetype)init {
     if ((self = [super init])) {
-        _lines = [NSMutableArray array];
+        ensureQtStarted();
+        // Create the C++ impl on the Qt thread so QObjects are affine to it.
+        [self performSelector:@selector(_createImpl)
+                     onThread:gQtThread
+                   withObject:nil
+                waitUntilDone:YES];
     }
     return self;
 }
 
-- (void)openFileAtPath:(NSString *)path {
-    // Stub: synthesize a large file so the log view can be exercised for scroll /
-    // selection / rendering work before the real indexer exists.
-    [_lines removeAllObjects];
-    NSError *err = nil;
-    NSString *real = [NSString stringWithContentsOfFile:path
-                                               encoding:NSUTF8StringEncoding
-                                                  error:&err];
-    if (real && !err) {
-        [_lines addObjectsFromArray:[real componentsSeparatedByString:@"\n"]];
-    } else {
-        for (NSUInteger i = 0; i < 1000000; i++) {
-            [_lines addObject:[NSString stringWithFormat:
-                @"%@ [stub] line %lu — replace with real engine output",
-                path.lastPathComponent, (unsigned long)i]];
-        }
-    }
-    __weak __typeof__(self) weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        __typeof__(self) s = weakSelf; if (!s) return;
-        if ([s.delegate respondsToSelector:@selector(kloggEngine:loadingProgress:)])
-            [s.delegate kloggEngine:s loadingProgress:100];
-        if ([s.delegate respondsToSelector:@selector(kloggEngine:loadingFinished:)])
-            [s.delegate kloggEngine:s loadingFinished:YES];
-    });
+- (void)_createImpl {
+    // Runs on gQtThread.
+    _impl = new KloggEngineImpl();
+    _impl->context = std::make_unique<QObject>();
+    _impl->logData = std::make_unique<LogData>();
+
+    // Capture a weak reference so callbacks don't extend self's lifetime.
+    __weak KloggEngine* weakSelf = self;
+
+    QObject::connect(
+        _impl->logData.get(), &LogData::loadingProgressed,
+        _impl->context.get(),
+        [weakSelf](int percent) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                KloggEngine* e = weakSelf; if (!e) return;
+                if ([e.delegate respondsToSelector:@selector(kloggEngine:loadingProgress:)])
+                    [e.delegate kloggEngine:e loadingProgress:percent];
+            });
+        },
+        Qt::QueuedConnection);
+
+    QObject::connect(
+        _impl->logData.get(), &LogData::loadingFinished,
+        _impl->context.get(),
+        [weakSelf](LoadingStatus status) {
+            fprintf(stderr, "[bridge] loadingFinished signal received on Qt thread\n"); fflush(stderr);
+            BOOL ok = (status == LoadingStatus::Successful);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                KloggEngine* e = weakSelf; if (!e) return;
+                if ([e.delegate respondsToSelector:@selector(kloggEngine:loadingFinished:)])
+                    [e.delegate kloggEngine:e loadingFinished:ok];
+            });
+        },
+        Qt::QueuedConnection);
 }
 
-- (NSUInteger)lineCount { return _lines.count; }
-
-- (NSString *)lineStringAtIndex:(NSUInteger)index {
-    if (index >= _lines.count) return nil;
-    return _lines[index];
+- (void)dealloc {
+    KloggEngineImpl* impl = _impl;
+    _impl = nullptr;
+    // Destroy on the Qt thread to keep QObject teardown on the right thread.
+    [self performSelector:@selector(_destroyImpl:)
+                 onThread:gQtThread
+               withObject:[NSValue valueWithPointer:impl]
+            waitUntilDone:YES];
 }
 
-- (NSArray<NSString *> *)linesInRange:(NSRange)range expandTabs:(BOOL)expand {
-    if (range.location >= _lines.count) return @[];
-    NSUInteger end = MIN(range.location + range.length, _lines.count);
-    NSRange clamped = NSMakeRange(range.location, end - range.location);
-    NSArray<NSString *> *slice = [_lines subarrayWithRange:clamped];
-    if (!expand) return slice;
-    NSMutableArray<NSString *> *out = [NSMutableArray arrayWithCapacity:slice.count];
-    for (NSString *l in slice)
-        [out addObject:[l stringByReplacingOccurrencesOfString:@"\t" withString:@"        "]];
+- (void)_destroyImpl:(NSValue*)val {
+    delete static_cast<KloggEngineImpl*>(val.pointerValue);
+}
+
+// MARK: - File open
+
+- (void)openFileAtPath:(NSString*)path {
+    if (!_impl) return;
+    const QString qpath = QString::fromNSString(path);
+    KloggEngineImpl* impl = _impl;
+    fprintf(stderr, "[bridge] openFileAtPath: %s\n", path.UTF8String); fflush(stderr);
+    QMetaObject::invokeMethod(
+        impl->context.get(),
+        [impl, qpath]() {
+            fprintf(stderr, "[bridge] attachFile running on Qt thread\n"); fflush(stderr);
+            impl->logData->attachFile(qpath);
+        },
+        Qt::QueuedConnection);
+}
+
+// MARK: - Line access (thread-safe reads via AbstractLogData)
+
+- (NSUInteger)lineCount {
+    if (!_impl) return 0;
+    return static_cast<NSUInteger>(_impl->logData->getNbLine().get());
+}
+
+- (nullable NSString*)lineStringAtIndex:(NSUInteger)index {
+    if (!_impl) return nil;
+    LogData* ld = _impl->logData.get();
+    LinesCount total = ld->getNbLine();
+    LineNumber ln(static_cast<LineNumber::UnderlyingType>(index));
+    if (!(ln < total)) return nil;
+    return ld->getLineString(ln).toNSString();
+}
+
+- (NSArray<NSString*>*)linesInRange:(NSRange)range expandTabs:(BOOL)expand {
+    if (!_impl) return @[];
+    LogData* ld = _impl->logData.get();
+    LinesCount total = ld->getNbLine();
+
+    LineNumber::UnderlyingType first =
+        static_cast<LineNumber::UnderlyingType>(range.location);
+    if (LineNumber(first) >= total) return @[];
+
+    uint64_t available = total.get() - first;
+    uint64_t requested = static_cast<uint64_t>(range.length);
+    uint64_t count     = (requested < available) ? requested : available;
+
+    klogg::vector<QString> lines =
+        expand
+        ? ld->getExpandedLines(LineNumber(first), LinesCount(count))
+        : ld->getLines(LineNumber(first), LinesCount(count));
+
+    NSMutableArray<NSString*>* out = [NSMutableArray arrayWithCapacity:lines.size()];
+    for (const QString& qs : lines)
+        [out addObject:qs.toNSString()];
     return out;
 }
 
-- (void)searchWithPattern:(NSString *)pattern
+// MARK: - Search (TODO Phase 3)
+
+- (void)searchWithPattern:(NSString*)pattern
           caseInsensitive:(BOOL)caseInsensitive
                     regex:(BOOL)isRegex {
-    NSUInteger count = 0;
-    NSStringCompareOptions opts = caseInsensitive ? NSCaseInsensitiveSearch : 0;
-    if (pattern.length) {
-        for (NSString *l in _lines)
-            if ([l rangeOfString:pattern options:opts].location != NSNotFound) count++;
-    }
+    // TODO(Phase 3): Wire LogFilteredData.  Returns 0 matches for now.
     __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        __typeof__(self) s = weakSelf; if (!s) return;
+        KloggEngine* s = weakSelf; if (!s) return;
         if ([s.delegate respondsToSelector:@selector(kloggEngine:searchFinished:)])
-            [s.delegate kloggEngine:s searchFinished:count];
+            [s.delegate kloggEngine:s searchFinished:0];
     });
 }
 
-- (void)cancel { /* stub: nothing in flight */ }
+// MARK: - Cancel
+
+- (void)cancel {
+    if (!_impl) return;
+    KloggEngineImpl* impl = _impl;
+    QMetaObject::invokeMethod(
+        impl->context.get(),
+        [impl]() { impl->logData->interruptLoading(); },
+        Qt::QueuedConnection);
+}
 
 @end

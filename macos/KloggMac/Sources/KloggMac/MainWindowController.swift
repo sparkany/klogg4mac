@@ -59,13 +59,21 @@ final class MainWindowController: NSWindowController, KloggEngineDelegate {
         panel.canChooseDirectories = false
         panel.begin { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
-            self?.engine.openFile(atPath: url.path)
+            self?.openFile(path: url.path)
         }
+    }
+
+    /// Open a file by path (used by the menu and by command-line `KloggMac <file>`).
+    func openFile(path: String) {
+        window?.title = (path as NSString).lastPathComponent
+        engine.openFile(atPath: path)
     }
 
     // MARK: - KloggEngineDelegate
 
     func kloggEngine(_ engine: Any, loadingFinished success: Bool) {
+        FileHandle.standardError.write(
+            "[verify] loadingFinished success=\(success) lineCount=\(self.engine.lineCount()) firstLine=\(self.engine.lineString(at: 0) ?? "<nil>")\n".data(using: .utf8)!)
         mainView.reloadFromEngine()
     }
 }
