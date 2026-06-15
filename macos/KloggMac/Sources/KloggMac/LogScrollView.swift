@@ -163,15 +163,13 @@ final class LogDocumentView: NSView {
 
     init(engine: KloggEngine) {
         self.engine = engine
-        let fm = NSLayoutManager()   // lightweight FM without a text storage
         // Use typographic line height: ascender + |descender| + leading, rounded up + 2px.
         let ascender  = logFont.ascender
         let descender = abs(logFont.descender)
         let leading   = logFont.leading
         rowHeight = ceil(ascender + descender + leading) + 2
-        // For a monospaced font, character width == advance of any glyph.
+        // For a monospaced font, character advance is uniform across all glyphs.
         charWidth = logFont.advancement(forGlyph: logFont.glyph(withName: "M")).width
-        _ = fm   // silence unused warning
         super.init(frame: .zero)
     }
 
@@ -212,7 +210,6 @@ final class LogDocumentView: NSView {
         // Fetch visible lines from engine (O(visible rows)).
         let range  = NSRange(location: firstRow, length: lastRow - firstRow + 1)
         let fetched = engine.lines(in: range, expandTabs: true)
-        Swift.print("[LogDocumentView] draw: rows \(firstRow)–\(lastRow), count=\(currentLineCount), rowH=\(rowHeight), fetched=\(fetched.count), first='\(fetched.first ?? "(nil)")', gutter=\(gutterView?.gutterWidth ?? -1)")
 
         // X offset: gutter takes the left portion of the doc view coordinate space.
         let gutterWidth = gutterView?.gutterWidth ?? 0

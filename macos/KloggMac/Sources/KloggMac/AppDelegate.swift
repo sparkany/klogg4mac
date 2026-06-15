@@ -1,8 +1,8 @@
 //
-//  AppDelegate.swift — application lifecycle + menu bar.
+//  AppDelegate.swift — application lifecycle.
 //
-//  The menu/toolbar here are a starting skeleton owned by the `shell` role; the
-//  1:1 menu structure from klogg's `menu.cpp` is filled in during Phase 2.
+//  Installs the full klogg menu bar (via AppMenu.install()) and creates the
+//  main window. Handles command-line file arguments and macOS open-file events.
 //
 
 import AppKit
@@ -12,15 +12,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: MainWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        installMainMenu()
+        // Install the full klogg menu bar (Wave 2).
+        AppMenu.install()
+
         let wc = MainWindowController()
         wc.showWindow(nil)
         windowController = wc
         NSApp.activate(ignoringOtherApps: true)
 
         // Open a file passed on the command line: `KloggMac <path>`.
-        if let path = CommandLine.arguments.dropFirst().first(where: { !$0.hasPrefix("-") }),
-           FileManager.default.fileExists(atPath: path) {
+        // Prefer the first non-flag argument that points to an existing file.
+        if let path = CommandLine.arguments.dropFirst()
+                .first(where: { !$0.hasPrefix("-") && FileManager.default.fileExists(atPath: $0) }) {
             wc.openFile(path: path)
         }
     }
@@ -29,31 +32,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
-    // MARK: - Menu (skeleton)
+    // MARK: - NSApplicationDelegate: open-file events (Finder double-click, etc.)
 
-    private func installMainMenu() {
-        let mainMenu = NSMenu()
+    func application(_ sender: NSApplication, openFile filename: String) -> Bool {
+        windowController?.openFile(path: filename)
+        return true
+    }
 
-        // App menu
-        let appItem = NSMenuItem()
-        mainMenu.addItem(appItem)
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About klogg", action: nil, keyEquivalent: "")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit klogg",
-                        action: #selector(NSApplication.terminate(_:)),
-                        keyEquivalent: "q")
-        appItem.submenu = appMenu
-
-        // File menu
-        let fileItem = NSMenuItem()
-        mainMenu.addItem(fileItem)
-        let fileMenu = NSMenu(title: "File")
-        fileMenu.addItem(withTitle: "Open…",
-                         action: #selector(MainWindowController.openDocument(_:)),
-                         keyEquivalent: "o")
-        fileItem.submenu = fileMenu
-
-        NSApp.mainMenu = mainMenu
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        for path in filenames { windowController?.openFile(path: path) }
     }
 }
