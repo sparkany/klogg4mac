@@ -64,3 +64,4 @@ website/resources/
 # macOS native port build artifacts
 /build-arm64/
 macos/KloggMac/.build/
+macos/*.png

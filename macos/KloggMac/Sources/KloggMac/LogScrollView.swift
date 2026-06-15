@@ -33,6 +33,8 @@ final class LogScrollView: NSScrollView {
 
     private let docView: LogDocumentView
     private let gutter: LogLineNumberGutter
+    /// Guards the one-shot stub auto-load (shared across all instances of this class).
+    private static var stubAutoLoadFired = false
 
     init(engine: KloggEngine) {
         docView = LogDocumentView(engine: engine)
@@ -58,6 +60,20 @@ final class LogScrollView: NSScrollView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    /// Auto-load stub content on first appearance for stub-mode testing.
+    /// In real mode (engine wired) this is a no-op.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, KloggEngine.isStub else { return }
+        // Only the first view to appear triggers the load; the delegate callback
+        // (MainWindowController.kloggEngine:loadingFinished:) will call
+        // mainView.reloadFromEngine() to refresh the display.
+        guard !LogScrollView.stubAutoLoadFired else { return }
+        LogScrollView.stubAutoLoadFired = true
+        // Synthetic path: stub generates 1,000,000 lines for any non-file path.
+        docView.engine.openFile(atPath: "stub://1M-lines")
+    }
 
     /// Called by MainWindowController (and engine delegate) after a file loads.
     func reloadFromEngine() {

@@ -87,6 +87,25 @@ static void ensureQtStarted()
         [NSThread sleepForTimeInterval:0.001];
 }
 
+/// Run `block` synchronously on the Qt event-loop thread and wait for it.
+///
+/// We must NOT use performSelector:onThread:waitUntilDone: here: that relies on
+/// the target thread running a Cocoa NSRunLoop, but gQtThread runs Qt's
+/// QCoreApplication event loop, whose (non-GUI) event dispatcher on macOS does
+/// not service Cocoa run-loop sources — so the selector would never fire and we
+/// would deadlock. Instead we post the work through Qt's own event loop via
+/// QMetaObject::invokeMethod (queued) and block on a semaphore until it runs.
+static void runSyncOnQtThread(dispatch_block_t block)
+{
+    if ([NSThread currentThread] == gQtThread) { block(); return; }
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    QMetaObject::invokeMethod(qApp, [block, sem]() {
+        block();
+        dispatch_semaphore_signal(sem);
+    }, Qt::QueuedConnection);
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+}
+
 // ---------------------------------------------------------------------------
 // Internal engine holder (C++ struct, lives on gQtThread)
 // ---------------------------------------------------------------------------
@@ -110,10 +129,7 @@ struct KloggEngineImpl {
     if ((self = [super init])) {
         ensureQtStarted();
         // Create the C++ impl on the Qt thread so QObjects are affine to it.
-        [self performSelector:@selector(_createImpl)
-                     onThread:gQtThread
-                   withObject:nil
-                waitUntilDone:YES];
+        runSyncOnQtThread(^{ [self _createImpl]; });
     }
     return self;
 }
@@ -143,7 +159,6 @@ struct KloggEngineImpl {
         _impl->logData.get(), &LogData::loadingFinished,
         _impl->context.get(),
         [weakSelf](LoadingStatus status) {
-            fprintf(stderr, "[bridge] loadingFinished signal received on Qt thread\n"); fflush(stderr);
             BOOL ok = (status == LoadingStatus::Successful);
             dispatch_async(dispatch_get_main_queue(), ^{
                 KloggEngine* e = weakSelf; if (!e) return;
@@ -158,14 +173,7 @@ struct KloggEngineImpl {
     KloggEngineImpl* impl = _impl;
     _impl = nullptr;
     // Destroy on the Qt thread to keep QObject teardown on the right thread.
-    [self performSelector:@selector(_destroyImpl:)
-                 onThread:gQtThread
-               withObject:[NSValue valueWithPointer:impl]
-            waitUntilDone:YES];
-}
-
-- (void)_destroyImpl:(NSValue*)val {
-    delete static_cast<KloggEngineImpl*>(val.pointerValue);
+    if (impl) runSyncOnQtThread(^{ delete impl; });
 }
 
 // MARK: - File open
@@ -174,13 +182,9 @@ struct KloggEngineImpl {
     if (!_impl) return;
     const QString qpath = QString::fromNSString(path);
     KloggEngineImpl* impl = _impl;
-    fprintf(stderr, "[bridge] openFileAtPath: %s\n", path.UTF8String); fflush(stderr);
     QMetaObject::invokeMethod(
         impl->context.get(),
-        [impl, qpath]() {
-            fprintf(stderr, "[bridge] attachFile running on Qt thread\n"); fflush(stderr);
-            impl->logData->attachFile(qpath);
-        },
+        [impl, qpath]() { impl->logData->attachFile(qpath); },
         Qt::QueuedConnection);
 }
 

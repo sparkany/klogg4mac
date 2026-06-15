@@ -12,7 +12,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: MainWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        FileHandle.standardError.write("[verify] didFinishLaunching args=\(CommandLine.arguments)\n".data(using: .utf8)!)
         installMainMenu()
         let wc = MainWindowController()
         wc.showWindow(nil)

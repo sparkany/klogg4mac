@@ -72,8 +72,6 @@ final class MainWindowController: NSWindowController, KloggEngineDelegate {
     // MARK: - KloggEngineDelegate
 
     func kloggEngine(_ engine: Any, loadingFinished success: Bool) {
-        FileHandle.standardError.write(
-            "[verify] loadingFinished success=\(success) lineCount=\(self.engine.lineCount()) firstLine=\(self.engine.lineString(at: 0) ?? "<nil>")\n".data(using: .utf8)!)
         mainView.reloadFromEngine()
     }
 }
