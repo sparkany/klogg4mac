@@ -201,6 +201,35 @@ final class PredefinedFiltersWindowController: NSWindowController {
     @objc private func cancelClicked(_ sender: Any?) {
         window?.orderOut(nil)
     }
+
+    // MARK: - Self-test hooks (headless QA)
+
+    /// Drive the editor's real add → edit → commit path and persist to the store.
+    /// Returns the committed filter count.
+    @discardableResult
+    func selfTestAddFilter(name: String, pattern: String,
+                           useRegex: Bool, ignoreCase: Bool) -> Int {
+        window?.contentView?.layoutSubtreeIfNeeded()
+        addFilter(nil)
+        nameField.stringValue    = name
+        patternField.stringValue = pattern
+        regexCheck.state         = useRegex   ? .on : .off
+        caseCheck.state          = ignoreCase ? .on : .off
+        fieldEdited(nil)
+        okClicked(nil)
+        return PredefinedFilterStore.shared.filters.count
+    }
+
+    /// Delete the filter at `index` and commit; returns the new committed count.
+    @discardableResult
+    func selfTestDeleteFilter(at index: Int) -> Int {
+        window?.contentView?.layoutSubtreeIfNeeded()
+        loadFromStore()
+        selectRow(index)
+        removeFilter(nil)
+        okClicked(nil)
+        return PredefinedFilterStore.shared.filters.count
+    }
 }
 
 // MARK: - NSTableViewDataSource / Delegate

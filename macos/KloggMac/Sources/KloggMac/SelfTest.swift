@@ -26,6 +26,15 @@ enum SelfTest {
         out += "\n" + predefinedFilterTests(wc)
         out += "\n" + overviewTests(wc)
         out += "\n" + textWrapTests(wc)
+        out += "\n" + preferencesLiveApplyTests(wc)
+        out += "\n" + highlightersEditorTests(wc)
+        out += "\n" + predefinedFiltersEditorTests(wc)
+        out += "\n" + scratchpadTransformTests()
+        out += "\n" + searchCorrectnessTests(wc)
+        out += "\n" + quickFindEdgeTests(wc)
+        out += "\n" + goToLineBoundsTests(wc)
+        out += "\n" + edgeRobustnessTests(wc)
+        out += "\n" + shortcutAudit()
         out += "===== END SELFTEST =====\n"
         FileHandle.standardError.write(out.data(using: .utf8)!)
     }
@@ -567,5 +576,487 @@ enum SelfTest {
             ? "PASS session clear\n"
             : "FAIL session clear: \(prefs.sessionOpenFiles)\n"
         return s
+    }
+
+    // MARK: - Preferences live-apply (Wave 9)
+
+    /// Prove the Preferences controls don't just persist but LIVE-APPLY to open views:
+    /// (a) a font-size change resizes the main-view rowHeight, (b) toggling the main
+    /// line-number preference shows/hides the gutter (width >0 vs 0).
+    private static func preferencesLiveApplyTests(_ wc: MainWindowController) -> String {
+        var s = "--- PREFERENCES LIVE-APPLY TESTS ---\n"
+        let prefs = AppPreferences.shared
+
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-prefs-\(UUID().uuidString).log")
+        let body = (1...20).map { "log line number \($0)" }.joined(separator: "\n") + "\n"
+        guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write prefs test file\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        wc.selfTestOpen(path)
+        wait(timeout: 5.0) { wc.selfTestCurrentLineCount >= 20 }
+        wc.selfTestApplyPreferencesToCurrentTab()
+
+        // (a) Font size → rowHeight. Save + restore the real preference.
+        let savedSize = prefs.fontSize
+        prefs.fontSize = 12
+        wc.selfTestApplyPreferencesToCurrentTab()
+        let h12 = wc.selfTestMainRowHeight
+        prefs.fontSize = 24
+        wc.selfTestApplyPreferencesToCurrentTab()
+        let h24 = wc.selfTestMainRowHeight
+        prefs.fontSize = savedSize
+        wc.selfTestApplyPreferencesToCurrentTab()
+        s += (h24 > h12 && h12 > 0)
+            ? "PASS font-size change resizes rows: rowHeight \(Int(h12))pt → \(Int(h24))pt\n"
+            : "FAIL font-size live-apply: rowHeight \(h12) → \(h24) (expected bigger)\n"
+
+        // (b) Line-number toggle → gutter width. Default is ON.
+        let savedLN = prefs.lineNumbersInMain
+        prefs.lineNumbersInMain = true
+        wc.selfTestApplyPreferencesToCurrentTab()
+        let gOn = wc.selfTestMainGutterWidth
+        prefs.lineNumbersInMain = false
+        wc.selfTestApplyPreferencesToCurrentTab()
+        let gOff = wc.selfTestMainGutterWidth
+        prefs.lineNumbersInMain = savedLN
+        wc.selfTestApplyPreferencesToCurrentTab()
+        s += (gOn > 0 && gOff == 0)
+            ? "PASS line-number toggle shows/hides gutter: width \(Int(gOn)) → \(Int(gOff))\n"
+            : "FAIL line-number gutter toggle: width \(gOn) → \(gOff) (expected >0 → 0)\n"
+
+        // (c) Round-trip a couple of typed prefs through AppPreferences.
+        let savedRegex = prefs.mainRegexpType
+        prefs.mainRegexpType = 1
+        let rt = prefs.mainRegexpType == 1
+        prefs.mainRegexpType = savedRegex
+        s += rt ? "PASS mainRegexpType round-trips (0↔1)\n"
+                : "FAIL mainRegexpType round-trip\n"
+
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Highlighters editor internals (Wave 9)
+
+    /// Prove the Highlighters editor's controls actually mutate + persist the store AND
+    /// reach the render path: add a rule via the editor's real add→form→OK path, assert
+    /// it's in HighlighterStore and that a freshly-built LogHighlighter colours a line
+    /// matching it; then delete it and assert it's gone + no longer colours.
+    private static func highlightersEditorTests(_ wc: MainWindowController) -> String {
+        var s = "--- HIGHLIGHTERS EDITOR TESTS ---\n"
+        let editor = wc.selfTestHighlightersEditor
+        let store = HighlighterStore.shared
+
+        let baseline = store.rules
+        defer { store.setRules(baseline) }      // restore the user's real rules
+
+        // Start from a known clean slate.
+        store.setRules([])
+        wait(timeout: 1.0) { store.rules.isEmpty }
+
+        let token = "QASELFTEST_HL_TOKEN"
+        let countAfterAdd = editor.selfTestAddRule(
+            name: "QA rule", pattern: token, useRegex: false, ignoreCase: false,
+            matchOnly: true, fore: .black, back: .yellow)
+        wait(timeout: 1.0) { store.rules.contains { $0.pattern == token } }
+        let added = store.rules.contains { $0.pattern == token && $0.matchOnly }
+        s += (countAfterAdd >= 1 && added)
+            ? "PASS editor added rule → store has it (count=\(store.rules.count))\n"
+            : "FAIL editor add rule (count=\(countAfterAdd) present=\(added))\n"
+
+        // The rule must reach draw(): a fresh LogHighlighter colours a line with the token.
+        let colours = wc.selfTestHighlighterColorsLabel(text: "prefix \(token) suffix")
+        s += colours
+            ? "PASS added highlighter colours a matching line (reaches draw())\n"
+            : "FAIL added highlighter does not colour a matching line\n"
+
+        // Add a second rule, then reorder (move idx 1 up) and assert order persisted.
+        editor.selfTestAddRule(name: "QA rule 2", pattern: "SECOND", useRegex: false,
+                               ignoreCase: false, matchOnly: true, fore: .black, back: .green)
+        wait(timeout: 1.0) { store.rules.count == 2 }
+        let names = editor.selfTestMoveRuleUp(at: 1)
+        s += (names.first == "QA rule 2")
+            ? "PASS editor reorder persists: \(names)\n"
+            : "FAIL editor reorder: \(names) (expected 'QA rule 2' first)\n"
+
+        // Delete all our test rules and assert the highlighter stops colouring.
+        editor.selfTestDeleteRule(at: 0)
+        editor.selfTestDeleteRule(at: 0)
+        wait(timeout: 1.0) { store.rules.isEmpty }
+        let stillColours = wc.selfTestHighlighterColorsLabel(text: "prefix \(token) suffix")
+        s += (store.rules.isEmpty && !stillColours)
+            ? "PASS editor delete removes rules (highlighter no longer colours)\n"
+            : "FAIL editor delete (count=\(store.rules.count) stillColours=\(stillColours))\n"
+        return s
+    }
+
+    // MARK: - Predefined-filters editor internals (Wave 9)
+
+    /// Prove the Predefined-filters editor persists to PredefinedFilterStore AND that a
+    /// stored filter then runs correctly through the search-bar code path (match count).
+    private static func predefinedFiltersEditorTests(_ wc: MainWindowController) -> String {
+        var s = "--- PREDEFINED-FILTERS EDITOR TESTS ---\n"
+        let editor = wc.selfTestPredefinedFiltersEditor
+        let store = PredefinedFilterStore.shared
+
+        let baseline = store.filters
+        defer { store.setFilters(baseline) }
+        store.setFilters([])
+        wait(timeout: 1.0) { store.filters.isEmpty }
+
+        let count = editor.selfTestAddFilter(name: "QA Errors", pattern: "ERROR",
+                                             useRegex: false, ignoreCase: false)
+        wait(timeout: 1.0) { store.filters.contains { $0.name == "QA Errors" } }
+        let stored = store.filters.first { $0.name == "QA Errors" }
+        s += (count >= 1 && stored?.pattern == "ERROR")
+            ? "PASS editor added filter → store has it (count=\(store.filters.count))\n"
+            : "FAIL editor add filter (count=\(count) stored=\(String(describing: stored)))\n"
+
+        // Run the stored filter on a known file via the picker path; assert match count.
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-pfeditor-\(UUID().uuidString).log")
+        let body = (1...4).map { "ERROR e\($0)" }.joined(separator: "\n") + "\n"
+            + (1...6).map { "INFO i\($0)" }.joined(separator: "\n") + "\n"
+        if (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil {
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            wc.selfTestOpen(path)
+            wait(timeout: 5.0) { wc.selfTestCurrentLineCount >= 10 }
+            if let f = stored {
+                wc.selfTestApplyPredefinedFilter(f)
+                let got = wait(timeout: 5.0) { wc.selfTestSearchMatchCount == 4 }
+                s += got
+                    ? "PASS stored filter runs via search path → \(wc.selfTestSearchMatchCount) matches (expected 4)\n"
+                    : "FAIL stored filter search: \(wc.selfTestSearchMatchCount) (expected 4)\n"
+            }
+            wc.closeCurrentTab(nil)
+        }
+
+        // Delete and assert gone.
+        editor.selfTestDeleteFilter(at: 0)
+        wait(timeout: 1.0) { store.filters.isEmpty }
+        s += store.filters.isEmpty
+            ? "PASS editor delete removes filter\n"
+            : "FAIL editor delete (count=\(store.filters.count))\n"
+        return s
+    }
+
+    // MARK: - Scratchpad transforms (Wave 9)
+
+    /// Prove the scratchpad transforms produce correct output for known inputs. These
+    /// are the exact pure functions the toolbar buttons run.
+    private static func scratchpadTransformTests() -> String {
+        var s = "--- SCRATCHPAD TRANSFORM TESTS ---\n"
+        typealias T = ScratchpadWindowController.Transforms
+
+        func check(_ label: String, _ got: String?, _ want: String) {
+            s += (got == want)
+                ? "PASS \(label): \"\(want)\"\n"
+                : "FAIL \(label): got \(got.map { "\"\($0)\"" } ?? "nil") (expected \"\(want)\")\n"
+        }
+
+        check("base64 encode 'klogg'", T.encodeBase64("klogg"), "a2xvZ2c=")
+        check("base64 decode 'a2xvZ2c='", T.decodeBase64("a2xvZ2c="), "klogg")
+        check("hex encode 'AB'", T.encodeHex("AB"), "4142")
+        check("hex decode '6b6c6f6767'", T.decodeHex("6b6c6f6767"), "klogg")
+        check("url decode 'a%20b%2Fc'", T.decodeURL("a%20b%2Fc"), "a b/c")
+
+        // base64 round-trip on arbitrary text.
+        let rt = T.encodeBase64("Hello, 世界!").flatMap { T.decodeBase64($0) }
+        s += (rt == "Hello, 世界!")
+            ? "PASS base64 round-trip preserves unicode\n"
+            : "FAIL base64 round-trip: got \(rt.map { "\"\($0)\"" } ?? "nil")\n"
+
+        // JSON pretty-print: compact in → multi-line, sorted keys out, still parses back.
+        let json = T.formatJSON("{\"b\":1,\"a\":2}")
+        let jsonOk = (json?.contains("\n") == true)
+            && (json?.range(of: "\"a\"")?.lowerBound ?? json!.endIndex)
+                < (json?.range(of: "\"b\"")?.lowerBound ?? json!.startIndex)
+        s += jsonOk
+            ? "PASS JSON format pretty-prints + sorts keys\n"
+            : "FAIL JSON format: \(json ?? "nil")\n"
+        return s
+    }
+
+    // MARK: - Search correctness (Wave 9)
+
+    /// Drive search correctness across cases against a controlled corpus, cross-checking
+    /// the in-process matcher (same compile rules the views use) for: plain substring,
+    /// case sensitivity, regex, regex special chars, and no-match.
+    private static func searchCorrectnessTests(_ wc: MainWindowController) -> String {
+        var s = "--- SEARCH CORRECTNESS TESTS ---\n"
+
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-search-\(UUID().uuidString).log")
+        // Known corpus:
+        //   3 lines containing "ERROR", 2 containing "error" (lowercase),
+        //   2 lines with "a.b" literal dots, 1 with "axb".
+        let lines = [
+            "ERROR alpha", "ERROR beta", "ERROR gamma",
+            "error lower one", "error lower two",
+            "value a.b here", "another a.b token", "regex axb match",
+            "INFO nothing special",
+        ]
+        let body = lines.joined(separator: "\n") + "\n"
+        guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write search test file\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        wc.selfTestOpen(path)
+        wait(timeout: 5.0) { wc.selfTestCurrentLineCount >= lines.count }
+
+        func expect(_ label: String, _ got: Int, _ want: Int) {
+            s += (got == want) ? "PASS \(label): \(got)\n"
+                               : "FAIL \(label): \(got) (expected \(want))\n"
+        }
+
+        // Plain, case-sensitive: "ERROR" → 3 (lowercase 'error' excluded).
+        expect("plain 'ERROR' case-sensitive",
+               wc.selfTestCountMatches(pattern: "ERROR", caseInsensitive: false, isRegex: false), 3)
+        // Plain, case-insensitive: "error" → 5 (ERROR + error).
+        expect("plain 'error' case-insensitive",
+               wc.selfTestCountMatches(pattern: "error", caseInsensitive: true, isRegex: false), 5)
+        // Literal special chars (plain mode escapes): "a.b" → 2 (the literal-dot lines),
+        // NOT "axb" (which a regex '.' would also match).
+        expect("plain 'a.b' (dot literal)",
+               wc.selfTestCountMatches(pattern: "a.b", caseInsensitive: false, isRegex: false), 2)
+        // Regex mode: "a.b" → 3 (the 2 literal-dot lines + 'axb').
+        expect("regex 'a.b' (dot wildcard)",
+               wc.selfTestCountMatches(pattern: "a.b", caseInsensitive: false, isRegex: true), 3)
+        // Regex anchor: "^ERROR" → 3.
+        expect("regex '^ERROR' anchored",
+               wc.selfTestCountMatches(pattern: "^ERROR", caseInsensitive: false, isRegex: true), 3)
+        // No-match.
+        expect("no-match 'ZZZZZ'",
+               wc.selfTestCountMatches(pattern: "ZZZZZ", caseInsensitive: false, isRegex: false), 0)
+
+        // Cross-check against grep for the case-sensitive ERROR count.
+        let grepCount = grepLineCount(pattern: "ERROR", path: path, caseInsensitive: false)
+        s += (grepCount == 3)
+            ? "PASS grep cross-check 'ERROR' = 3\n"
+            : "FAIL grep cross-check 'ERROR' = \(grepCount) (expected 3)\n"
+
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    /// Count matching lines via the system grep (cross-check oracle). -1 on failure.
+    private static func grepLineCount(pattern: String, path: String, caseInsensitive: Bool) -> Int {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
+        p.arguments = (caseInsensitive ? ["-c", "-i"] : ["-c"]) + ["-F", pattern, path]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return -1 }
+        p.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return Int(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+    }
+
+    // MARK: - QuickFind edge cases (Wave 9)
+
+    /// Prove QuickFind next/prev wrap correctly at the file boundaries and handle
+    /// no-match. Corpus has the needle on the first and last lines so wrap is observable.
+    private static func quickFindEdgeTests(_ wc: MainWindowController) -> String {
+        var s = "--- QUICKFIND EDGE TESTS ---\n"
+
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-qf-\(UUID().uuidString).log")
+        // 10 lines; "NEEDLE" on line 0 and line 9 (first & last).
+        var lines = (0...9).map { "filler \($0)" }
+        lines[0] = "NEEDLE first"
+        lines[9] = "NEEDLE last"
+        let body = lines.joined(separator: "\n") + "\n"
+        guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write quickfind test file\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        wc.selfTestOpen(path)
+        wait(timeout: 5.0) { wc.selfTestCurrentLineCount >= 10 }
+
+        func qf(_ from: Int, next: Bool) -> Int {
+            wc.selfTestQuickFindFrom(line: from, needle: "NEEDLE",
+                                     caseInsensitive: true, isRegex: false, next: next)
+        }
+        func expect(_ label: String, _ got: Int, _ want: Int) {
+            s += (got == want) ? "PASS \(label): line \(got)\n"
+                               : "FAIL \(label): line \(got) (expected \(want))\n"
+        }
+
+        // From line 0, next → line 9 (the other match).
+        expect("next from line 0 → 9", qf(0, next: true), 9)
+        // From line 9, next → wraps to line 0.
+        expect("next from last (wrap) → 0", qf(9, next: true), 0)
+        // From line 0, prev → wraps backward to line 9.
+        expect("prev from first (wrap) → 9", qf(0, next: false), 9)
+        // From line 9, prev → line 0.
+        expect("prev from line 9 → 0", qf(9, next: false), 0)
+        // From a middle line, next → 9, prev → 0.
+        expect("next from middle (5) → 9", qf(5, next: true), 9)
+        expect("prev from middle (5) → 0", qf(5, next: false), 0)
+        // No-match needle → -1.
+        let nm = wc.selfTestQuickFindFrom(line: 0, needle: "ZZZNOPE",
+                                          caseInsensitive: true, isRegex: false, next: true)
+        s += (nm == -1) ? "PASS no-match needle returns -1\n"
+                        : "FAIL no-match needle returned \(nm)\n"
+
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Go-to-line bounds (Wave 9)
+
+    /// Prove go-to-line rejects out-of-range input (0, negative, > lineCount) and accepts
+    /// valid lines, clamping the view sensibly.
+    private static func goToLineBoundsTests(_ wc: MainWindowController) -> String {
+        var s = "--- GO-TO-LINE BOUNDS TESTS ---\n"
+
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-goto-\(UUID().uuidString).log")
+        let body = (1...50).map { "line \($0)" }.joined(separator: "\n") + "\n"
+        guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write goto test file\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        wc.selfTestOpen(path)
+        wait(timeout: 5.0) { wc.selfTestCurrentLineCount >= 50 }
+        let lc = wc.selfTestCurrentLineCount
+
+        // Out of range: 0, negative, lc+1 → -1 (rejected).
+        s += (wc.selfTestGoToLineResult(oneBased: 0) == -1)
+            ? "PASS go-to-line 0 rejected\n" : "FAIL go-to-line 0 not rejected\n"
+        s += (wc.selfTestGoToLineResult(oneBased: -5) == -1)
+            ? "PASS go-to-line negative rejected\n" : "FAIL go-to-line negative not rejected\n"
+        s += (wc.selfTestGoToLineResult(oneBased: lc + 1) == -1)
+            ? "PASS go-to-line > lineCount rejected\n" : "FAIL go-to-line > lineCount not rejected\n"
+        // Valid: line 1 accepted (returns a non-negative first-visible line).
+        s += (wc.selfTestGoToLineResult(oneBased: 1) >= 0)
+            ? "PASS go-to-line 1 accepted\n" : "FAIL go-to-line 1 rejected\n"
+        // Valid: last line accepted.
+        s += (wc.selfTestGoToLineResult(oneBased: lc) >= 0)
+            ? "PASS go-to-line lineCount accepted\n" : "FAIL go-to-line lineCount rejected\n"
+
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Edge / robustness (Wave 9)
+
+    /// Prove the app survives degenerate inputs without crashing and behaves sanely:
+    /// non-existent path, empty file, opening the same file twice (focuses one tab),
+    /// closing the last tab.
+    private static func edgeRobustnessTests(_ wc: MainWindowController) -> String {
+        var s = "--- EDGE / ROBUSTNESS TESTS ---\n"
+        let startCount = wc.selfTestTabCount
+
+        // Non-existent path: opening still creates a tab (engine reports 0 lines) and
+        // doesn't crash. klogg also opens an empty view for a missing file.
+        let ghost = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-DOES-NOT-EXIST-\(UUID().uuidString).log")
+        wc.selfTestOpen(ghost)
+        wait(timeout: 1.0) { wc.selfTestTabCount == startCount + 1 }
+        s += (wc.selfTestTabCount == startCount + 1)
+            ? "PASS open non-existent path: no crash, tab opened (lineCount=\(wc.selfTestCurrentLineCount))\n"
+            : "FAIL open non-existent path: tab count \(wc.selfTestTabCount)\n"
+        wc.closeCurrentTab(nil)
+
+        // Empty file: opens, 0 lines, no crash.
+        let empty = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-empty-\(UUID().uuidString).log")
+        FileManager.default.createFile(atPath: empty, contents: Data())
+        defer { try? FileManager.default.removeItem(atPath: empty) }
+        wc.selfTestOpen(empty)
+        wait(timeout: 3.0) { wc.selfTestTabCount == startCount + 1 }
+        let emptyLines = wc.selfTestCurrentLineCount
+        s += (wc.selfTestTabCount == startCount + 1 && emptyLines == 0)
+            ? "PASS open empty file: 0 lines, no crash\n"
+            : "FAIL open empty file: tabs=\(wc.selfTestTabCount) lines=\(emptyLines)\n"
+
+        // Open the SAME file again → should focus the existing tab, not add another.
+        let beforeDup = wc.selfTestTabCount
+        wc.selfTestOpen(empty)
+        wait(timeout: 1.0) { true }
+        s += (wc.selfTestTabCount == beforeDup)
+            ? "PASS open same file twice: focuses existing tab (no dup, count=\(wc.selfTestTabCount))\n"
+            : "FAIL open same file twice: count \(beforeDup) → \(wc.selfTestTabCount)\n"
+        wc.closeCurrentTab(nil)
+
+        // Close last tab when none remain → no crash, count clamps at start.
+        while wc.selfTestTabCount > startCount { wc.closeCurrentTab(nil) }
+        wc.closeCurrentTab(nil)   // extra close with (potentially) nothing to close
+        s += "PASS close beyond last tab: no crash (count=\(wc.selfTestTabCount))\n"
+        return s
+    }
+
+    // MARK: - Keyboard shortcut audit (Wave 9)
+
+    /// Walk every menu item and report its key equivalent, then compare a curated set
+    /// against klogg's defaults (src/settings/src/shortcuts.cpp). Any mismatch is a FAIL.
+    private static func shortcutAudit() -> String {
+        var s = "--- SHORTCUT AUDIT (ours vs klogg) ---\n"
+        guard let main = NSApp.mainMenu else { return s + "  <no main menu>\n" }
+
+        // Collect (title → "modifiers+key") for all leaf items.
+        var found: [String: String] = [:]
+        func walk(_ menu: NSMenu) {
+            for item in menu.items {
+                if let sub = item.submenu { walk(sub); continue }
+                guard !item.keyEquivalent.isEmpty else { continue }
+                found[item.title] = describe(item)
+            }
+        }
+        for top in main.items { if let sub = top.submenu { walk(sub) } }
+
+        // Print the full table first.
+        for (title, ke) in found.sorted(by: { $0.key < $1.key }) {
+            s += "  \(title) = \(ke)\n"
+        }
+
+        // Curated expectations derived from klogg's defaults (Qt → macOS Cmd mapping):
+        //   Open ⌘O, Close ⌘W, Find ⌘F, Find Next ⌘G, Find Previous ⌘⇧G,
+        //   Go to Line ⌘L (klogg Ctrl+L), Reload ⌘R (Refresh), Quit ⌘Q, Copy ⌘C,
+        //   Select All ⌘A, Open from Clipboard ⌘V (Paste), Clear Log ⌘X (Cut),
+        //   Follow File 'f' (bare), Text Wrap 'w' (bare).
+        let expectations: [(String, String)] = [
+            ("Open…",                "⌘O"),
+            ("Close",                "⌘W"),
+            ("Find…",                "⌘F"),
+            ("Find Next",            "⌘G"),
+            ("Find Previous",        "⇧⌘G"),
+            ("Go to Line…",          "⌘L"),
+            ("Reload",               "⌘R"),
+            ("Quit klogg",           "⌘Q"),
+            ("Copy",                 "⌘C"),
+            ("Select All",           "⌘A"),
+            ("Open from Clipboard",  "⌘V"),
+            ("Clear Log",            "⌘X"),
+            ("Follow File",          "F"),
+            ("Text Wrap",            "W"),
+        ]
+        s += "  --- parity checks ---\n"
+        for (title, want) in expectations {
+            let got = found[title] ?? "<missing>"
+            s += (got == want)
+                ? "PASS shortcut \(title) = \(want)\n"
+                : "FAIL shortcut \(title): ours=\(got) klogg=\(want)\n"
+        }
+        return s
+    }
+
+    /// Human-readable modifier+key string for a menu item (e.g. "⌘⇧G", "f").
+    private static func describe(_ item: NSMenuItem) -> String {
+        var m = ""
+        let f = item.keyEquivalentModifierMask
+        if f.contains(.control) { m += "⌃" }
+        if f.contains(.option)  { m += "⌥" }
+        if f.contains(.shift)   { m += "⇧" }
+        if f.contains(.command) { m += "⌘" }
+        return m + item.keyEquivalent.uppercased()
     }
 }

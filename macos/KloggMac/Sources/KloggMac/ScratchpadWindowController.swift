@@ -289,23 +289,32 @@ final class ScratchpadWindowController: NSWindowController {
 
     // MARK: - Toolbar actions
 
-    @objc private func actDecodeBase64(_ sender: Any?) {
-        transformInPlace { text in
+    @objc private func actDecodeBase64(_ sender: Any?) { transformInPlace(Transforms.decodeBase64) }
+    @objc private func actEncodeBase64(_ sender: Any?) { transformInPlace(Transforms.encodeBase64) }
+    @objc private func actDecodeHex(_ sender: Any?)    { transformInPlace(Transforms.decodeHex) }
+    @objc private func actEncodeHex(_ sender: Any?)    { transformInPlace(Transforms.encodeHex) }
+    @objc private func actDecodeURL(_ sender: Any?)    { transformInPlace(Transforms.decodeURL) }
+    @objc private func actFormatJSON(_ sender: Any?)   { transformInPlace(Transforms.formatJSON) }
+    @objc private func actFormatXML(_ sender: Any?)    { transformInPlace(Transforms.formatXML) }
+
+    // MARK: - Pure transforms (window-free, so the headless harness can verify them)
+
+    /// The toolbar transforms as pure String → String? functions. The `act…` handlers
+    /// and the self-test both call these; nil means "no usable result" (caller beeps /
+    /// shows a status). Kept here so the exact behaviour matches what the UI runs.
+    enum Transforms {
+        static func decodeBase64(_ text: String) -> String? {
             guard let data = Data(base64Encoded: text.trimmingCharacters(in: .whitespacesAndNewlines),
                                   options: .ignoreUnknownCharacters),
-                  let s    = String(data: data, encoding: .utf8) else { return nil }
+                  let s = String(data: data, encoding: .utf8) else { return nil }
             return s
         }
-    }
 
-    @objc private func actEncodeBase64(_ sender: Any?) {
-        transformInPlace { text in
+        static func encodeBase64(_ text: String) -> String? {
             Data(text.utf8).base64EncodedString()
         }
-    }
 
-    @objc private func actDecodeHex(_ sender: Any?) {
-        transformInPlace { text in
+        static func decodeHex(_ text: String) -> String? {
             let clean = text.replacingOccurrences(of: " ", with: "")
                             .replacingOccurrences(of: "\n", with: "")
             var bytes: [UInt8] = []
@@ -318,22 +327,16 @@ final class ScratchpadWindowController: NSWindowController {
             return String(bytes: bytes, encoding: .utf8)
                 ?? String(bytes: bytes, encoding: .isoLatin1)
         }
-    }
 
-    @objc private func actEncodeHex(_ sender: Any?) {
-        transformInPlace { text in
+        static func encodeHex(_ text: String) -> String? {
             Data(text.utf8).map { String(format: "%02x", $0) }.joined()
         }
-    }
 
-    @objc private func actDecodeURL(_ sender: Any?) {
-        transformInPlace { text in
+        static func decodeURL(_ text: String) -> String? {
             text.removingPercentEncoding
         }
-    }
 
-    @objc private func actFormatJSON(_ sender: Any?) {
-        transformInPlace { text in
+        static func formatJSON(_ text: String) -> String? {
             guard let start = text.firstIndex(where: { $0 == "{" || $0 == "[" }) else { return nil }
             let sub = String(text[start...])
             guard let data   = sub.data(using: .utf8),
@@ -343,10 +346,8 @@ final class ScratchpadWindowController: NSWindowController {
                   let str    = String(data: pretty, encoding: .utf8) else { return nil }
             return str
         }
-    }
 
-    @objc private func actFormatXML(_ sender: Any?) {
-        transformInPlace { text in
+        static func formatXML(_ text: String) -> String? {
             guard text.contains("<"),
                   let data = text.data(using: .utf8),
                   let doc  = try? XMLDocument(data: data, options: .nodePrettyPrint)

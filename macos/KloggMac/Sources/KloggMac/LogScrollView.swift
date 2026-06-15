@@ -116,6 +116,16 @@ final class LogScrollView: NSScrollView {
     /// Number of lines this view currently displays.
     var lineCount: Int { docView.currentLineCount }
 
+    /// Exact pixel height of one row (derived from font metrics). Changes when the
+    /// font-size preference changes — the headless harness asserts on this to prove a
+    /// font change live-applies.
+    var rowHeight: CGFloat { docView.rowHeight }
+
+    /// The effective line-number gutter width: the gutter's computed width when the
+    /// line-number preference for this view's mode is ON, otherwise 0 (gutter hidden).
+    /// Lets the harness assert the gutter shows/hides as the preference toggles.
+    var gutterWidth: CGFloat { docView.effectiveGutterWidth }
+
     /// Text of the first currently-selected line (trimmed), or nil if nothing is
     /// selected. Used by the colour-label feature to label the selected token.
     var currentSelectionText: String? { docView.currentSelectionText }
@@ -357,6 +367,12 @@ final class LogDocumentView: NSView {
         case .main:     return AppPreferences.shared.lineNumbersInMain
         case .filtered: return AppPreferences.shared.lineNumbersInFiltered
         }
+    }
+
+    /// The gutter width as draw() uses it: the computed width when line numbers are on
+    /// for this mode, else 0. Exposed for headless assertions on gutter visibility.
+    var effectiveGutterWidth: CGFloat {
+        lineNumbersEnabled ? (gutterView?.gutterWidth ?? 0) : 0
     }
 
     // MARK: Layout constants (matching klogg's abstractlogview feel)

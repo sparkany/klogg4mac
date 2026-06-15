@@ -288,6 +288,54 @@ final class HighlightersWindowController: NSWindowController {
     @objc private func cancelClicked(_ sender: Any?) {
         window?.orderOut(nil)
     }
+
+    // MARK: - Self-test hooks (headless QA)
+
+    /// Drive the editor's real add → edit-form → commit path: add a rule, fill the
+    /// form fields exactly as the UI does, and click OK so it persists to the store.
+    /// Returns the committed rule count. Loads the contentView lazily so the form
+    /// controls exist even though the window is never shown.
+    @discardableResult
+    func selfTestAddRule(name: String, pattern: String, useRegex: Bool,
+                         ignoreCase: Bool, matchOnly: Bool,
+                         fore: NSColor, back: NSColor) -> Int {
+        window?.contentView?.layoutSubtreeIfNeeded()
+        addRule(nil)                       // appends a "New rule" + selects it
+        nameField.stringValue    = name
+        patternField.stringValue = pattern
+        regexCheck.state         = useRegex   ? .on : .off
+        caseCheck.state          = ignoreCase ? .on : .off
+        matchOnlyCheck.state     = matchOnly  ? .on : .off
+        enabledCheck.state       = .on
+        foreWell.color           = fore
+        backWell.color           = back
+        fieldEdited(nil)                   // stage form → working rule
+        colorChanged(nil)                  // stage colours → working rule
+        okClicked(nil)                     // commit to HighlighterStore
+        return HighlighterStore.shared.rules.count
+    }
+
+    /// Delete the rule at `index` and commit. Returns the new committed count.
+    @discardableResult
+    func selfTestDeleteRule(at index: Int) -> Int {
+        window?.contentView?.layoutSubtreeIfNeeded()
+        loadFromStore()
+        selectRow(index)
+        removeRule(nil)
+        okClicked(nil)
+        return HighlighterStore.shared.rules.count
+    }
+
+    /// Move the rule at `index` up one slot and commit; returns the new order's names.
+    @discardableResult
+    func selfTestMoveRuleUp(at index: Int) -> [String] {
+        window?.contentView?.layoutSubtreeIfNeeded()
+        loadFromStore()
+        selectRow(index)
+        moveRuleUp(nil)
+        okClicked(nil)
+        return HighlighterStore.shared.rules.map { $0.name }
+    }
 }
 
 // MARK: - NSTableViewDataSource / Delegate
