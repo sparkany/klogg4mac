@@ -120,6 +120,16 @@ final class LogScrollView: NSScrollView {
     /// selected. Used by the colour-label feature to label the selected token.
     var currentSelectionText: String? { docView.currentSelectionText }
 
+    /// 0-based index of the first line visible in the viewport (for the overview's
+    /// "you are here" indicator). 0 when there's no content.
+    var firstVisibleLine: Int { docView.firstVisibleLine }
+
+    /// Number of lines visible in the viewport (for the overview indicator).
+    var visibleLineCount: Int { docView.visibleLineCount }
+
+    /// Called after any scroll so the owner can update an overview viewport indicator.
+    var onScroll: (() -> Void)?
+
     // MARK: - Search / QuickFind highlight (Wave 6)
 
     /// Highlight the active SearchBarView pattern in this view (main-view search wash).
@@ -175,6 +185,7 @@ final class LogScrollView: NSScrollView {
     /// pinned to the viewport's left edge — follows the scroll position.
     @objc private func boundsChanged() {
         docView.needsDisplay = true
+        onScroll?()
     }
 }
 
@@ -306,6 +317,20 @@ final class LogDocumentView: NSView {
     /// 0-based extent (caret) of the current selection; nil when nothing selected.
     /// QuickFind reads this to start its incremental find from the current position.
     var currentSelectedLine: Int? { selection.state.extentLine }
+
+    /// First line visible in the enclosing scroll view's viewport (0 if no content).
+    var firstVisibleLine: Int {
+        guard rowHeight > 0 else { return 0 }
+        let y = enclosingScrollView?.contentView.bounds.origin.y ?? 0
+        return max(0, min(currentLineCount, Int(floor(y / rowHeight))))
+    }
+
+    /// Number of lines that fit in the viewport.
+    var visibleLineCount: Int {
+        guard rowHeight > 0 else { return 0 }
+        let h = enclosingScrollView?.contentView.bounds.height ?? bounds.height
+        return max(0, Int(ceil(h / rowHeight)))
+    }
 
     /// Trimmed text of the first selected line, fetched from the engine. nil when no
     /// selection. Drives the colour-label feature (label the selected token).

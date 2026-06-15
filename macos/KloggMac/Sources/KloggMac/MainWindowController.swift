@@ -366,7 +366,7 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     // MARK: - View menu actions
 
     @objc func toggleOverview(_ sender: Any?) {
-        // TODO(Phase 3): show/hide overview minimap
+        tabController.toggleOverview()
     }
 
     @objc func toggleMainLineNumbers(_ sender: NSMenuItem) {
@@ -584,6 +584,9 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         case #selector(toggleFilteredLineNumbers(_:)):
             menuItem.state = AppPreferences.shared.lineNumbersInFiltered ? .on : .off
             return true
+        case #selector(toggleOverview(_:)):
+            menuItem.state = tabController.currentOverviewVisible ? .on : .off
+            return true
         case #selector(clearRecentFiles(_:)):
             return !RecentFiles.shared.paths.isEmpty
         case #selector(assignColorLabel(_:)):
@@ -657,6 +660,26 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         guard let tab = tabController.currentTab else { return }
         tab.mainView.reloadFromEngine()
         if tab.isFollowing { tab.scrollMainToEnd() }
+    }
+
+    // --- Overview minimap (headless) ---
+
+    /// Toggle the overview strip on all tabs; returns the new visibility.
+    @discardableResult
+    func selfTestToggleOverview() -> Bool { tabController.toggleOverview() }
+
+    /// Whether the active tab's overview strip is visible.
+    var selfTestOverviewVisible: Bool { tabController.currentOverviewVisible }
+
+    /// Number of match marks the overview will plot (== current search match count).
+    var selfTestOverviewMatchCount: Int { tabController.currentOverviewMatchCount }
+
+    /// Run a search on the active tab (so the overview has matches to plot), driving
+    /// the same engine path as the search bar.
+    func selfTestRunSearch(pattern: String, caseInsensitive: Bool, isRegex: Bool) {
+        tabController.currentTab?.engine.search(withPattern: pattern,
+                                                caseInsensitive: caseInsensitive,
+                                                regex: isRegex)
     }
 
     // --- Predefined filters in search bar (headless) ---
@@ -739,7 +762,11 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         guard let content = window?.contentView else { return false }
         content.frame = NSRect(origin: .zero, size: size)
         content.layoutSubtreeIfNeeded()
-        // Force the log views to fetch + lay out their visible rows.
+        // Force the log views + overview to fetch + lay out from the latest engine
+        // state (async callbacks may not have been pumped yet), then lay out again so
+        // the overview picks up its now-nonzero height.
+        tabController.refreshCurrentTabViews()
+        content.layoutSubtreeIfNeeded()
         tabController.updateStatusBar()
         guard let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else {
             return false

@@ -24,6 +24,7 @@ enum SelfTest {
         out += "\n" + sessionTests()
         out += "\n" + colorLabelTests(wc)
         out += "\n" + predefinedFilterTests(wc)
+        out += "\n" + overviewTests(wc)
         out += "===== END SELFTEST =====\n"
         FileHandle.standardError.write(out.data(using: .utf8)!)
     }
@@ -422,6 +423,61 @@ enum SelfTest {
             ? "PASS predefined filter \"ERROR\" ran search → \(count) matches (expected 5)\n"
             : "FAIL predefined filter search: got \(count) matches (expected 5)\n"
 
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Overview minimap tests (Wave 8)
+
+    /// Prove the overview strip: open a file, run a search with a known match count,
+    /// and verify (a) the visibility flag toggles, (b) the overview plots exactly
+    /// searchMatchCount marks. Snapshot the strip with marks visible (overview ON).
+    private static func overviewTests(_ wc: MainWindowController) -> String {
+        var s = "--- OVERVIEW MINIMAP TESTS ---\n"
+
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-overview-\(UUID().uuidString).log")
+        // 6 MATCH lines interleaved among 30 filler lines (so marks spread vertically).
+        var lines: [String] = []
+        for i in 1...30 {
+            lines.append(i % 5 == 0 ? "MATCH important event \(i)" : "filler line \(i)")
+        }
+        let body = lines.joined(separator: "\n") + "\n"
+        guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write overview test file\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        wc.selfTestOpen(path)
+        wait(timeout: 5.0) { wc.selfTestCurrentLineCount >= 30 }
+
+        // Ensure the overview is visible for the snapshot + assertions.
+        if !wc.selfTestOverviewVisible { wc.selfTestToggleOverview() }
+        let visAfterOn = wc.selfTestOverviewVisible
+        s += visAfterOn ? "PASS overview visible flag ON\n" : "FAIL overview not visible\n"
+
+        // Run a search; the engine has 6 MATCH lines (i = 5,10,15,20,25,30).
+        wc.selfTestRunSearch(pattern: "MATCH", caseInsensitive: false, isRegex: false)
+        let got = wait(timeout: 5.0) { wc.selfTestOverviewMatchCount == 6 }
+        let marks = wc.selfTestOverviewMatchCount
+        s += got
+            ? "PASS overview plots searchMatchCount marks: \(marks) (expected 6)\n"
+            : "FAIL overview mark count: \(marks) (expected 6)\n"
+
+        // Snapshot with the strip visible + marks plotted.
+        let dir = ProcessInfo.processInfo.environment["KLOGG_SNAPSHOT_DIR"] ?? NSTemporaryDirectory()
+        let onSnap = (dir as NSString).appendingPathComponent("klogg-snapshot-overview-on.png")
+        s += wc.selfTestSnapshot(to: onSnap) ? "PASS wrote \(onSnap)\n" : "FAIL overview-on snapshot\n"
+
+        // Toggle OFF and assert the flag flips (regression: strip hidden, log unaffected).
+        wc.selfTestToggleOverview()
+        let visAfterOff = wc.selfTestOverviewVisible
+        s += !visAfterOff ? "PASS overview visible flag OFF\n" : "FAIL overview stuck ON\n"
+        let offSnap = (dir as NSString).appendingPathComponent("klogg-snapshot-overview-off.png")
+        s += wc.selfTestSnapshot(to: offSnap) ? "PASS wrote \(offSnap)\n" : "FAIL overview-off snapshot\n"
+
+        // Restore the default ON for subsequent runs and clean up.
+        wc.selfTestToggleOverview()
         wc.closeCurrentTab(nil)
         return s
     }

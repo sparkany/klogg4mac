@@ -29,6 +29,13 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     let filteredView: LogScrollView
     private let searchBar = SearchBarView()
 
+    // Overview minimap (Wave 8): a thin strip to the right of the log split showing
+    // the whole file with search-match positions. Width toggles 0/stripWidth.
+    private let overview = OverviewView()
+    private var overviewWidth: NSLayoutConstraint?
+    /// Whether the overview strip is visible (persisted in AppPreferences).
+    private(set) var isOverviewVisible = AppPreferences.shared.overviewVisible
+
     // QuickFind (Wave 6): an incremental in-place find bar over the main view.
     private let quickFindBar = QuickFindBar()
     private lazy var quickFind = QuickFindController(engine: engine)
@@ -102,6 +109,7 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         container.addSubview(searchBar)
         container.addSubview(quickFindBar)
         container.addSubview(split)
+        container.addSubview(overview)
 
         // QuickFind bar sits between the search bar and the split; it is collapsed
         // to zero height (hidden) until Cmd+F. Its own intrinsic 30pt height anchor
@@ -109,6 +117,16 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         let qfHeight = quickFindBar.heightAnchor.constraint(equalToConstant: 0)
         quickFindHeight = qfHeight
         quickFindBar.isHidden = true
+
+        // Overview strip: pinned to the trailing edge, spanning the split's height.
+        // Its width toggles between 0 (hidden) and stripWidth; the split's trailing
+        // edge follows the overview's leading edge, so the log view shrinks to make
+        // room without overlapping. The strip is a sibling of the split — NEVER inside
+        // the scroll view's clip view (which would suppress text rendering).
+        let ovWidth = overview.widthAnchor.constraint(
+            equalToConstant: isOverviewVisible ? OverviewView.stripWidth : 0)
+        overviewWidth = ovWidth
+        overview.isHidden = !isOverviewVisible
 
         NSLayoutConstraint.activate([
             searchBar.topAnchor.constraint(equalTo: container.topAnchor),
@@ -123,10 +141,16 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
             split.topAnchor.constraint(equalTo: quickFindBar.bottomAnchor),
             split.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             split.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            split.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            split.trailingAnchor.constraint(equalTo: overview.leadingAnchor),
+
+            overview.topAnchor.constraint(equalTo: split.topAnchor),
+            overview.bottomAnchor.constraint(equalTo: split.bottomAnchor),
+            overview.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            ovWidth,
         ])
         self.view = container
 
+        wireOverview()
         wireQuickFind()
 
         // Defer the divider position until the view has a real size.
@@ -145,6 +169,9 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
             self?.engine.cancel()
         }
 
+        // Scrolling the main view repositions the overview's viewport indicator.
+        mainView.onScroll = { [weak self] in self?.refreshOverviewViewport() }
+
         // Clicking a filtered-view row jumps the main view to the matching source line.
         filteredView.onLineSelected = { [weak self] matchIndex in
             guard let self = self else { return }
@@ -153,6 +180,45 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
             guard sourceLine != UInt.max else { return }
             self.mainView.scrollToLine(Int(sourceLine))
         }
+    }
+
+    // MARK: - Overview minimap (Wave 8)
+
+    private func wireOverview() {
+        overview.matchLineAt = { [weak self] i in
+            guard let self = self else { return -1 }
+            let src = self.engine.searchMatchLine(at: UInt(i))
+            return src == UInt.max ? -1 : Int(src)
+        }
+        overview.onScrollToLine = { [weak self] line in
+            self?.mainView.scrollToLine(line)
+            self?.refreshOverviewViewport()
+        }
+        refreshOverview()
+    }
+
+    /// Show/hide the overview strip; persists the preference. Returns the new state.
+    @discardableResult
+    func setOverviewVisible(_ visible: Bool) -> Bool {
+        isOverviewVisible = visible
+        AppPreferences.shared.overviewVisible = visible
+        overview.isHidden = !visible
+        overviewWidth?.constant = visible ? OverviewView.stripWidth : 0
+        if visible { refreshOverview() }
+        return visible
+    }
+
+    /// Recompute the overview from the engine (file height + match count).
+    func refreshOverview() {
+        overview.reload(totalLines: Int(engine.lineCount()),
+                        matchCount: Int(engine.searchMatchCount()))
+        refreshOverviewViewport()
+    }
+
+    /// Update the overview's "you are here" indicator from the main view's position.
+    private func refreshOverviewViewport() {
+        overview.viewportFirstLine = mainView.firstVisibleLine
+        overview.viewportLineCount = mainView.visibleLineCount
     }
 
     // MARK: - Search
@@ -298,6 +364,7 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
 
     func kloggEngine(_ engine: Any, loadingFinished success: Bool) {
         mainView.reloadFromEngine()
+        refreshOverview()
         onLoadingFinished?(self, success)
         // When following, every re-index (file grew) ends here — jump to the new tail.
         if isFollowing { scrollMainToEnd() }
@@ -318,6 +385,7 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         searchBar.showProgress(false)
         searchBar.updateMatchCount(Int(matchCount), finished: true)
         filteredView.reloadFromEngine(lineCount: Int(matchCount))
+        refreshOverview()   // plot the new match positions on the strip
     }
 }
 
@@ -363,6 +431,35 @@ final class TabController: NSViewController {
     /// Run a predefined filter in the active tab's search bar (Wave 8).
     func applyPredefinedFilter(_ filter: PredefinedFilter) {
         currentTab?.applyPredefinedFilter(filter)
+    }
+
+    /// Whether the active tab's overview strip is visible (defaults to the persisted
+    /// preference when no tab is open, so the menu checkmark is sensible).
+    var currentOverviewVisible: Bool {
+        currentTab?.isOverviewVisible ?? AppPreferences.shared.overviewVisible
+    }
+
+    /// Toggle the overview strip on every open tab; returns the new state.
+    @discardableResult
+    func toggleOverview() -> Bool {
+        let newState = !AppPreferences.shared.overviewVisible
+        for tab in _tabs { tab.setOverviewVisible(newState) }
+        // Persist even when no tab is open so the next-opened tab honours it.
+        AppPreferences.shared.overviewVisible = newState
+        return newState
+    }
+
+    /// Number of match marks the active tab's overview will plot (== match count).
+    var currentOverviewMatchCount: Int { Int(currentTab?.engine.searchMatchCount() ?? 0) }
+
+    /// Sync the active tab's main view + overview from the engine and repaint. Used by
+    /// the headless snapshot path so the PNG reflects the latest engine state even when
+    /// the async loadingFinished/searchFinished callbacks haven't been pumped yet.
+    func refreshCurrentTabViews() {
+        guard let tab = currentTab else { return }
+        tab.mainView.reloadFromEngine()
+        tab.filteredView.reloadFromEngine(lineCount: Int(tab.engine.searchMatchCount()))
+        tab.refreshOverview()
     }
 
     /// Line count of the active tab's main view (for Go to Line range validation).

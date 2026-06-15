@@ -268,13 +268,13 @@ final class AppMenu {
 
         menu.addItem(.separator())
 
-        // Overview Visible — TODO Phase 3
+        // Overview Visible — toggles the file-overview minimap strip (Wave 8).
         let overview = menu.addItem(
             withTitle: "Overview Visible",
             action: #selector(MainWindowController.toggleOverview(_:)),
             keyEquivalent: "")
         overview.target = nil
-        overview.isEnabled = false   // TODO(Phase 3)
+        overview.state = AppPreferences.shared.overviewVisible ? .on : .off
 
         menu.addItem(.separator())
 

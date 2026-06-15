@@ -58,6 +58,11 @@ final class AppPreferences {
         set { set("view.lineNumbersVisibleInFiltered", b: newValue) }
     }
 
+    var overviewVisible: Bool {
+        get { bool("view.overviewVisible", default: true) }
+        set { set("view.overviewVisible", b: newValue) }
+    }
+
     // MARK: - Search  (keys: regexpType.*, defaultView.*)
 
     /// 0 = Extended Regexp, 1 = Fixed Strings  (matches klogg's SearchRegexpType index)
