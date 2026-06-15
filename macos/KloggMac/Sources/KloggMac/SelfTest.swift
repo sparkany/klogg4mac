@@ -17,9 +17,38 @@ enum SelfTest {
         var out = "===== KLOGG SELFTEST =====\n"
         out += auditMenu()
         out += "\n" + auditToolbar(wc)
+        out += "\n" + snapshots(wc)
         out += "\n" + behaviorTests(wc)
         out += "===== END SELFTEST =====\n"
         FileHandle.standardError.write(out.data(using: .utf8)!)
+    }
+
+    // MARK: - Offscreen snapshots
+
+    /// Render the loaded file (with line numbers on, then off) to PNGs under the
+    /// directory given by KLOGG_SNAPSHOT_DIR (default: the system temp dir). Verifies
+    /// the custom tab strip + log rendering survive headlessly.
+    private static func snapshots(_ wc: MainWindowController) -> String {
+        var s = "--- SNAPSHOTS ---\n"
+        guard wc.selfTestTabCount > 0 else {
+            s += "SKIP snapshots (no file opened)\n"
+            return s
+        }
+        let dir = ProcessInfo.processInfo.environment["KLOGG_SNAPSHOT_DIR"]
+            ?? NSTemporaryDirectory()
+        let onPath  = (dir as NSString).appendingPathComponent("klogg-snapshot-linenumbers-on.png")
+        let offPath = (dir as NSString).appendingPathComponent("klogg-snapshot-linenumbers-off.png")
+
+        let saved = AppPreferences.shared.lineNumbersInMain
+        AppPreferences.shared.lineNumbersInMain = true
+        let okOn = wc.selfTestSnapshot(to: onPath)
+        AppPreferences.shared.lineNumbersInMain = false
+        let okOff = wc.selfTestSnapshot(to: offPath)
+        AppPreferences.shared.lineNumbersInMain = saved   // restore
+
+        s += okOn  ? "PASS wrote \(onPath)\n"  : "FAIL snapshot (line numbers on)\n"
+        s += okOff ? "PASS wrote \(offPath)\n" : "FAIL snapshot (line numbers off)\n"
+        return s
     }
 
     // MARK: - Menu audit
@@ -93,16 +122,62 @@ enum SelfTest {
         let startCount = wc.selfTestTabCount
         s += "tabs at start: \(startCount)\n"
 
-        // Close-tab test (only meaningful if a file was opened via the arg).
-        if startCount > 0 {
-            wc.closeCurrentTab(nil)
-            let afterClose = wc.selfTestTabCount
-            s += afterClose == startCount - 1
-                ? "PASS close current tab: \(startCount) -> \(afterClose)\n"
-                : "FAIL close current tab: \(startCount) -> \(afterClose) (expected \(startCount - 1))\n"
-        } else {
-            s += "SKIP close-tab (no file opened; pass a log path as the last arg)\n"
+        guard startCount > 0 else {
+            s += "SKIP behavior tests (no file opened; pass a log path as the last arg)\n"
+            return s
         }
+        let openedPath = wc.selfTestCurrentFilePath ?? "<unknown>"
+
+        // 1) Favorites round-trip: toggle on, assert stored; toggle off, assert gone.
+        let wasFavorite = wc.selfTestCurrentIsFavorite
+        wc.selfTestToggleFavorite()
+        let afterAdd = wc.selfTestCurrentIsFavorite
+        wc.selfTestToggleFavorite()
+        let afterRemove = wc.selfTestCurrentIsFavorite
+        s += (afterAdd && !afterRemove)
+            ? "PASS favorites toggle round-trip (add=\(afterAdd), remove=\(afterRemove))\n"
+            : "FAIL favorites toggle round-trip (was=\(wasFavorite) add=\(afterAdd) remove=\(afterRemove))\n"
+
+        // 2) Line-number pref round-trip: flip main, assert persisted value flips back.
+        let lnBefore = AppPreferences.shared.lineNumbersInMain
+        AppPreferences.shared.lineNumbersInMain.toggle()
+        let lnAfter = AppPreferences.shared.lineNumbersInMain
+        AppPreferences.shared.lineNumbersInMain = lnBefore   // restore
+        s += (lnAfter == !lnBefore)
+            ? "PASS lineNumbersInMain toggle: \(lnBefore) -> \(lnAfter)\n"
+            : "FAIL lineNumbersInMain toggle: \(lnBefore) -> \(lnAfter)\n"
+
+        // 3) Reload preserves the line count (re-attaches the same path).
+        let lcBefore = wc.selfTestCurrentLineCount
+        wc.reloadFile(nil)
+        let lcAfter = wc.selfTestCurrentLineCount
+        s += (lcAfter == lcBefore && lcBefore >= 0)
+            ? "PASS reload preserves lineCount: \(lcBefore) -> \(lcAfter)\n"
+            : "FAIL reload lineCount: \(lcBefore) -> \(lcAfter)\n"
+
+        // 4) Close a SPECIFIC tab: open a second file, close tab index 0, assert the
+        //    surviving tab is the second one (not just "count dropped").
+        let secondPath = "\(openedPath).klogg-selftest-second"
+        FileManager.default.createFile(atPath: secondPath, contents: Data("x\ny\n".utf8))
+        wc.selfTestOpen(secondPath)
+        let twoCount = wc.selfTestTabCount
+        wc.selfTestCloseTab(at: 0)              // close the first (original) tab
+        let afterCloseSpecific = wc.selfTestTabCount
+        let survivor = wc.selfTestCurrentFilePath
+        s += (twoCount == startCount + 1
+              && afterCloseSpecific == twoCount - 1
+              && survivor == secondPath)
+            ? "PASS close-specific-tab: closed index 0, survivor=\(survivor.map { ($0 as NSString).lastPathComponent } ?? "nil")\n"
+            : "FAIL close-specific-tab: two=\(twoCount) after=\(afterCloseSpecific) survivor=\(survivor ?? "nil")\n"
+        try? FileManager.default.removeItem(atPath: secondPath)
+
+        // 5) Close remaining tab(s) — original close-current behavior still works.
+        let preClose = wc.selfTestTabCount
+        wc.closeCurrentTab(nil)
+        let afterClose = wc.selfTestTabCount
+        s += afterClose == preClose - 1
+            ? "PASS close current tab: \(preClose) -> \(afterClose)\n"
+            : "FAIL close current tab: \(preClose) -> \(afterClose) (expected \(preClose - 1))\n"
         return s
     }
 }

@@ -332,15 +332,44 @@ final class TabController: NSViewController {
     // MARK: - Private state
 
     private let tabView = NSTabView()
+    private let tabStrip = TabStripView()
 
     // MARK: - Init
 
     override func loadView() {
-        tabView.tabViewType = .topTabsBezelBorder
+        // Native top tabs draw no close buttons, so we hide them and render our own
+        // strip (with × close controls) above the borderless tab content.
+        tabView.tabViewType = .noTabsNoBorder
         tabView.allowsTruncatedLabels = true
         tabView.delegate = self
         tabView.translatesAutoresizingMaskIntoConstraints = false
-        self.view = tabView
+        tabStrip.translatesAutoresizingMaskIntoConstraints = false
+
+        tabStrip.onSelect = { [weak self] idx in self?.selectTab(at: idx) }
+        tabStrip.onClose  = { [weak self] idx in self?.closeTab(at: idx) }
+
+        let container = NSView(frame: .zero)
+        container.addSubview(tabStrip)
+        container.addSubview(tabView)
+        NSLayoutConstraint.activate([
+            tabStrip.topAnchor.constraint(equalTo: container.topAnchor),
+            tabStrip.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            tabStrip.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            tabStrip.heightAnchor.constraint(equalToConstant: TabStripView.stripHeight),
+
+            tabView.topAnchor.constraint(equalTo: tabStrip.bottomAnchor),
+            tabView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            tabView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            tabView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        self.view = container
+        refreshStrip()
+    }
+
+    /// Rebuild the custom tab strip from the current tab list + selection.
+    private func refreshStrip() {
+        let titles = _tabs.map { ($0.filePath as NSString).lastPathComponent }
+        tabStrip.reload(titles: titles, selected: selectedIndex() ?? -1)
     }
 
     // MARK: - Public API
@@ -372,6 +401,27 @@ final class TabController: NSViewController {
         // Kick off the engine load.
         tab.engine.openFile(atPath: path)
         RecentFiles.shared.add(path: path)
+        refreshStrip()
+    }
+
+    /// Select the tab at `index` (from a strip click).
+    func selectTab(at index: Int) {
+        guard index >= 0, index < _tabs.count else { return }
+        tabView.selectTabViewItem(at: index)
+        refreshStrip()
+    }
+
+    /// Close the tab at a specific index (from a strip × click).
+    func closeTab(at index: Int) {
+        removeTab(at: index)
+    }
+
+    /// Reload the active tab's file by re-attaching it through the engine. The
+    /// existing engine is re-pointed at the same path; loading callbacks refresh
+    /// the views and status bar when the re-index finishes.
+    func reloadCurrentTab() {
+        guard let tab = currentTab else { return }
+        tab.engine.reload()
     }
 
     /// Close the currently-active tab.
@@ -399,6 +449,7 @@ final class TabController: NSViewController {
         tabView.removeTabViewItem(item)
         _tabs.remove(at: index)
         updateStatusBar()
+        refreshStrip()
         onTabChanged?(currentTab)
     }
 
@@ -409,6 +460,7 @@ final class TabController: NSViewController {
         if currentTab === tab {
             updateStatusBar()
         }
+        refreshStrip()
         onTabChanged?(currentTab)
     }
 
@@ -438,6 +490,7 @@ extension TabController: NSTabViewDelegate {
 
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
         updateStatusBar()
+        refreshStrip()
         onTabChanged?(currentTab)
     }
 }
