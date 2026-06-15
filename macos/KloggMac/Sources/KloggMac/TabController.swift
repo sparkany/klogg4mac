@@ -36,7 +36,7 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     init(filePath: String) {
         self.filePath = filePath
         self.engine = KloggEngine()
-        self.mainView    = LogScrollView(engine: engine, mode: .main)
+        self.mainView     = LogScrollView(engine: engine, mode: .main)
         self.filteredView = LogScrollView(engine: engine, mode: .filtered)
         super.init(nibName: nil, bundle: nil)
         engine.delegate = self
@@ -83,6 +83,15 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         }
         searchBar.onCancel = { [weak self] in
             self?.engine.cancel()
+        }
+
+        // Clicking a filtered-view row jumps the main view to the matching source line.
+        filteredView.onLineSelected = { [weak self] matchIndex in
+            guard let self = self else { return }
+            let sourceLine = self.engine.searchMatchLine(at: UInt(matchIndex))
+            // NSNotFound bridges to UInt.max on 64-bit; skip invalid results.
+            guard sourceLine != UInt.max else { return }
+            self.mainView.scrollToLine(Int(sourceLine))
         }
     }
 
