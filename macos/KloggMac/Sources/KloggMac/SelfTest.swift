@@ -25,6 +25,7 @@ enum SelfTest {
         out += "\n" + colorLabelTests(wc)
         out += "\n" + predefinedFilterTests(wc)
         out += "\n" + overviewTests(wc)
+        out += "\n" + textWrapTests(wc)
         out += "===== END SELFTEST =====\n"
         FileHandle.standardError.write(out.data(using: .utf8)!)
     }
@@ -478,6 +479,62 @@ enum SelfTest {
 
         // Restore the default ON for subsequent runs and clean up.
         wc.selfTestToggleOverview()
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Text wrap tests (Wave 8)
+
+    /// Prove text wrap: open a file with one very long line, snapshot wrap OFF (long
+    /// line scrolls; one visual row) then wrap ON (long line soft-wraps to multiple
+    /// visual rows). Assert (a) the view-side wrap flag tracks the preference, (b) the
+    /// long line occupies 1 visual row off / >1 on, (c) a short line stays 1 row both
+    /// ways (non-wrap render path unaffected for short content).
+    private static func textWrapTests(_ wc: MainWindowController) -> String {
+        var s = "--- TEXT WRAP TESTS ---\n"
+
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-wrap-\(UUID().uuidString).log")
+        let longLine = "LONG " + String(repeating: "abcdefghij ", count: 60)  // ~660 chars
+        let body = "short head line\n" + longLine + "\nshort tail line\n"
+        guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write wrap test file\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let savedWrap = AppPreferences.shared.useTextWrap
+
+        wc.selfTestOpen(path)
+        wait(timeout: 5.0) { wc.selfTestCurrentLineCount >= 3 }
+
+        // Ensure wrap is OFF first.
+        if wc.selfTestTextWrapEnabled { wc.selfTestToggleTextWrap() }
+        let dir = ProcessInfo.processInfo.environment["KLOGG_SNAPSHOT_DIR"] ?? NSTemporaryDirectory()
+        let offSnap = (dir as NSString).appendingPathComponent("klogg-snapshot-wrap-off.png")
+        s += wc.selfTestSnapshot(to: offSnap) ? "PASS wrote \(offSnap)\n" : "FAIL wrap-off snapshot\n"
+        // After the snapshot the view is laid out at the snapshot width.
+        let offWrapFlag = wc.selfTestMainViewWrapEnabled
+        let offLongRows = wc.selfTestMainVisualRows(forLine: 1)
+        s += (!offWrapFlag && offLongRows == 1)
+            ? "PASS wrap OFF: view flag=\(offWrapFlag), long line = \(offLongRows) visual row\n"
+            : "FAIL wrap OFF: view flag=\(offWrapFlag), long line rows=\(offLongRows) (expected 1)\n"
+
+        // Turn wrap ON.
+        wc.selfTestToggleTextWrap()
+        let onSnap = (dir as NSString).appendingPathComponent("klogg-snapshot-wrap-on.png")
+        s += wc.selfTestSnapshot(to: onSnap) ? "PASS wrote \(onSnap)\n" : "FAIL wrap-on snapshot\n"
+        let onWrapFlag = wc.selfTestMainViewWrapEnabled
+        let onLongRows = wc.selfTestMainVisualRows(forLine: 1)
+        let onShortRows = wc.selfTestMainVisualRows(forLine: 0)
+        s += (onWrapFlag && onLongRows > 1)
+            ? "PASS wrap ON: view flag=\(onWrapFlag), long line = \(onLongRows) visual rows (>1)\n"
+            : "FAIL wrap ON: view flag=\(onWrapFlag), long line rows=\(onLongRows) (expected >1)\n"
+        s += (onShortRows == 1)
+            ? "PASS wrap ON: short line stays 1 visual row\n"
+            : "FAIL wrap ON: short line rows=\(onShortRows) (expected 1)\n"
+
+        // Restore the preference + clean up.
+        if AppPreferences.shared.useTextWrap != savedWrap { wc.selfTestToggleTextWrap() }
         wc.closeCurrentTab(nil)
         return s
     }

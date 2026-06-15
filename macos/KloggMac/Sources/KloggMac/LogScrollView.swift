@@ -130,6 +130,16 @@ final class LogScrollView: NSScrollView {
     /// Called after any scroll so the owner can update an overview viewport indicator.
     var onScroll: (() -> Void)?
 
+    /// Whether wrap is currently enabled on this view (headless assertions).
+    var isWrapEnabled: Bool { docView.wrapEnabled }
+
+    /// Number of visual rows the logical line `row` occupies at the current wrap width
+    /// (1 when wrap is off, or for a short line). Lets headless tests prove a long line
+    /// actually wraps to multiple rows. Returns 0 if `row` is out of range.
+    func visualRowCount(forLine row: Int) -> Int {
+        docView.visualRowCount(forLine: row)
+    }
+
     // MARK: - Search / QuickFind highlight (Wave 6)
 
     /// Highlight the active SearchBarView pattern in this view (main-view search wash).
@@ -176,7 +186,17 @@ final class LogScrollView: NSScrollView {
     /// hideAnsiColors) that don't change row metrics.
     func applyViewPreferences() {
         gutter.updateWidth(for: docView.currentLineCount)
+        applyTextWrapPreference()
         docView.needsDisplay = true
+    }
+
+    /// Sync the text-wrap preference: hide the horizontal scroller when wrapping (long
+    /// lines soft-wrap to the viewport instead of scrolling), show it otherwise. The
+    /// document view re-lays out and repaints. Safe to call repeatedly.
+    func applyTextWrapPreference() {
+        let wrap = AppPreferences.shared.useTextWrap
+        hasHorizontalScroller = !wrap
+        docView.setWrapEnabled(wrap, viewportWidth: contentView.bounds.width)
     }
 
     // MARK: - Scroll tracking
@@ -211,6 +231,51 @@ final class LogDocumentView: NSView {
     private(set) var rowHeight: CGFloat = 0
     /// Advance width of a single character (monospaced — all chars are the same).
     private var charWidth: CGFloat = 0
+
+    // MARK: Text wrap (Wave 8)
+
+    /// When true, long logical lines soft-wrap to the viewport width across multiple
+    /// visual rows instead of scrolling horizontally. The non-wrap path is unchanged.
+    ///
+    /// Layout note (documented limitation): in wrap mode the document height stays the
+    /// estimate `lineCount × rowHeight` (so the vertical scrollbar is approximate — a
+    /// long wrapped line doesn't expand it). Rendering, however, is exact and O(visible):
+    /// draw() picks the first visible LOGICAL line from the scroll offset and then stacks
+    /// each subsequent logical line's wrapped sub-rows sequentially down the viewport, so
+    /// no text is clipped or overlapped. Scrolling is therefore logical-line granular.
+    private(set) var wrapEnabled = AppPreferences.shared.useTextWrap
+
+    /// Enable/disable wrap and relayout. `viewportWidth` is advisory; draw() reads the
+    /// live clip-view width so resizes reflow without extra plumbing.
+    func setWrapEnabled(_ on: Bool, viewportWidth: CGFloat) {
+        wrapEnabled = on
+        refreshSizing(lineCount: currentLineCount)
+        needsDisplay = true
+    }
+
+    /// Number of visual rows logical line `row` occupies at the current wrap width.
+    /// 1 when wrap is off or the line fits; >1 when it wraps. 0 if out of range.
+    func visualRowCount(forLine row: Int) -> Int {
+        guard row >= 0, row < currentLineCount else { return 0 }
+        guard wrapEnabled, rowHeight > 0 else { return 1 }
+        let r = NSRange(location: row, length: 1)
+        let line: String
+        switch mode {
+        case .main:     line = engine.lines(in: r, expandTabs: true).first ?? ""
+        case .filtered: line = engine.filteredLines(in: r, expandTabs: true).first ?? ""
+        }
+        let gutterWidth = lineNumbersEnabled ? (gutterView?.gutterWidth ?? 0) : 0
+        let textX = gutterWidth + textLeftPadding
+        let viewportWidth = enclosingScrollView?.contentView.bounds.width ?? bounds.width
+        let wrapWidth = max(20, viewportWidth - textX - 6)
+        let attr = NSAttributedString(string: line, attributes: [
+            .font: logFont, .paragraphStyle: LogDocumentView.wrapParagraph,
+        ])
+        let bounding = attr.boundingRect(
+            with: NSSize(width: wrapWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading])
+        return max(1, Int(ceil(bounding.height / rowHeight)))
+    }
 
     // MARK: Highlighting / preferences
 
@@ -395,9 +460,13 @@ final class LogDocumentView: NSView {
     func refreshSizing(lineCount: Int) {
         currentLineCount = lineCount
         let height = CGFloat(lineCount) * rowHeight
-        // Width: compute from the longest line if we have lines, else use a wide default.
-        // (We defer expensive full-scan; just use a generous initial width.)
-        let docWidth = max(lineCountEstimatedMaxWidth, enclosingScrollView?.bounds.width ?? 800)
+        // Width: in wrap mode the document is exactly the viewport width (no horizontal
+        // scroll); otherwise use a generous default (we defer the expensive full-scan).
+        let viewportWidth = enclosingScrollView?.contentView.bounds.width
+            ?? enclosingScrollView?.bounds.width ?? 800
+        let docWidth = wrapEnabled
+            ? max(1, viewportWidth)
+            : max(lineCountEstimatedMaxWidth, viewportWidth)
         setFrameSize(NSSize(width: docWidth, height: max(height, 1)))
     }
 
@@ -413,6 +482,11 @@ final class LogDocumentView: NSView {
         dirtyRect.fill()
 
         guard currentLineCount > 0, rowHeight > 0 else { return }
+
+        if wrapEnabled {
+            drawWrapped(dirtyRect: dirtyRect)
+            return
+        }
 
         // Compute which rows intersect dirtyRect.
         let firstRow = max(0, Int(floor(dirtyRect.minY / rowHeight)))
@@ -496,6 +570,138 @@ final class LogDocumentView: NSView {
             drawGutter(dirtyRect: dirtyRect, firstRow: firstRow, lastRow: lastRow,
                        gutterWidth: gutterWidth)
         }
+    }
+
+    // MARK: - Wrapped drawing (Wave 8)
+
+    /// Wrapping paragraph style: wrap on word boundaries, falling back to char wrapping
+    /// for long unbroken tokens so a single huge token still fits the viewport.
+    private static let wrapParagraph: NSParagraphStyle = {
+        let p = NSMutableParagraphStyle()
+        p.lineBreakMode = .byCharWrapping
+        return p
+    }()
+
+    /// Render the visible logical lines, soft-wrapped to the viewport width. Starts at
+    /// the first logical line implied by the scroll offset and stacks each subsequent
+    /// line's wrapped height down the viewport until past dirtyRect. O(visible lines).
+    private func drawWrapped(dirtyRect: NSRect) {
+        let gutterWidth = lineNumbersEnabled ? (gutterView?.gutterWidth ?? 0) : 0
+        let textX       = gutterWidth + textLeftPadding
+        let scrollX     = enclosingScrollView?.contentView.bounds.origin.x ?? 0
+        // Text wraps to the space between the gutter and the right edge of the viewport.
+        let viewportWidth = enclosingScrollView?.contentView.bounds.width ?? bounds.width
+        let wrapWidth = max(20, viewportWidth - textX - 6)
+        let hideAnsi  = AppPreferences.shared.hideAnsiColors
+
+        // Anchor: the first logical line to draw, from the scroll offset (estimate model).
+        let anchorRow = max(0, min(currentLineCount - 1, Int(floor(dirtyRect.minY / rowHeight))))
+
+        // Track each drawn line's [y, height] so the gutter can place numbers on the
+        // first visual row of each logical line (klogg-style).
+        var rowYs: [(row: Int, y: CGFloat, height: CGFloat)] = []
+
+        var y = CGFloat(anchorRow) * rowHeight
+        var row = anchorRow
+        let stopY = dirtyRect.maxY
+        // Fetch in modest batches to stay O(visible) without one call per line.
+        let batch = 64
+        while row < currentLineCount && y < stopY {
+            let end = min(currentLineCount - 1, row + batch - 1)
+            let range = NSRange(location: row, length: end - row + 1)
+            let fetched: [String]
+            switch mode {
+            case .main:     fetched = engine.lines(in: range, expandTabs: true)
+            case .filtered: fetched = engine.filteredLines(in: range, expandTabs: true)
+            }
+            for raw in fetched {
+                guard y < stopY else { break }
+                let lineText = hideAnsi ? LogDocumentView.stripAnsi(raw) : raw
+                let h = drawWrappedLine(lineText, row: row, atY: y,
+                                        textX: textX, wrapWidth: wrapWidth)
+                rowYs.append((row, y, h))
+                visibleLineCache[row] = lineText
+                y += h
+                row += 1
+            }
+        }
+
+        // Gutter band + per-line numbers on the first visual row of each logical line.
+        if gutterWidth > 0 {
+            (NSColor(named: NSColor.Name("gutterBackground")) ?? NSColor.controlBackgroundColor).setFill()
+            NSRect(x: scrollX, y: dirtyRect.minY, width: gutterWidth, height: dirtyRect.height).fill()
+            NSColor.separatorColor.setFill()
+            NSRect(x: scrollX + gutterWidth - 1, y: dirtyRect.minY, width: 1, height: dirtyRect.height).fill()
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: logFont, .foregroundColor: NSColor.secondaryLabelColor,
+            ]
+            let innerPad: CGFloat = 6
+            for entry in rowYs {
+                let displayNum: Int
+                if mode == .filtered {
+                    let src = engine.searchMatchLine(at: UInt(entry.row))
+                    displayNum = (src == UInt.max) ? (entry.row + 1) : Int(src) + 1
+                } else {
+                    displayNum = entry.row + 1
+                }
+                let label = "\(displayNum)" as NSString
+                let size  = label.size(withAttributes: attrs)
+                let lx = scrollX + gutterWidth - innerPad - size.width
+                let ly = entry.y + (rowHeight - size.height) / 2
+                label.draw(at: NSPoint(x: lx, y: ly), withAttributes: attrs)
+            }
+        }
+    }
+
+    /// Draw one logical line wrapped to `wrapWidth`, returning the height it occupied
+    /// (a multiple of rowHeight, at least one row). Applies selection background,
+    /// search/quickfind washes, and highlighter colours via attribute runs so wrapping
+    /// is handled natively by AppKit.
+    private func drawWrappedLine(_ text: String, row: Int, atY y: CGFloat,
+                                 textX: CGFloat, wrapWidth: CGFloat) -> CGFloat {
+        let isSelected = selection.state.contains(line: row)
+        let fore = isSelected ? NSColor.selectedTextColor : NSColor.textColor
+        let attr = NSMutableAttributedString(string: text, attributes: [
+            .font: logFont,
+            .foregroundColor: fore,
+            .paragraphStyle: LogDocumentView.wrapParagraph,
+        ])
+        let full = NSRange(location: 0, length: (text as NSString).length)
+
+        // Highlighter colours (foreground + background spans).
+        if highlighter.hasRules {
+            let hl = highlighter.highlight(line: text)
+            for span in hl.spans {
+                let r = NSIntersectionRange(span.range, full)
+                guard r.length > 0 else { continue }
+                attr.addAttribute(.foregroundColor, value: span.fore, range: r)
+                attr.addAttribute(.backgroundColor, value: span.back, range: r)
+            }
+        }
+        // Search-match + QuickFind washes as background runs (legible: text on top).
+        for (re, colour) in [(searchMatchRegex, searchMatchBack), (quickFindRegex, quickFindBack)] {
+            guard let re = re else { continue }
+            for m in re.matches(in: text, options: [], range: full) where m.range.length > 0 {
+                attr.addAttribute(.backgroundColor, value: colour, range: m.range)
+            }
+        }
+
+        // Measure the wrapped height for this width.
+        let bounding = attr.boundingRect(
+            with: NSSize(width: wrapWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading])
+        let rows = max(1, Int(ceil(bounding.height / rowHeight)))
+        let height = CGFloat(rows) * rowHeight
+
+        // Selection background spans the full logical-line height across the viewport.
+        if isSelected {
+            NSColor.selectedTextBackgroundColor.setFill()
+            NSRect(x: 0, y: y, width: bounds.width, height: height).fill()
+        }
+
+        attr.draw(with: NSRect(x: textX, y: y, width: wrapWidth, height: height),
+                  options: [.usesLineFragmentOrigin, .usesFontLeading])
+        return height
     }
 
     /// Paint a translucent wash behind every match of `re` on this line. Match

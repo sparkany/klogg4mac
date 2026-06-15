@@ -79,7 +79,7 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     }
 
     @objc private func preferencesChanged() {
-        // Font change (relayout) + view prefs (line numbers / ANSI) + repaint.
+        // Font change (relayout) + view prefs (line numbers / ANSI / text wrap) + repaint.
         mainView.applyFontPreference()
         filteredView.applyFontPreference()
         mainView.applyViewPreferences()
@@ -152,6 +152,10 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
 
         wireOverview()
         wireQuickFind()
+
+        // Apply the persisted text-wrap preference to both views on load.
+        mainView.applyTextWrapPreference()
+        filteredView.applyTextWrapPreference()
 
         // Defer the divider position until the view has a real size.
         DispatchQueue.main.async { [weak split] in

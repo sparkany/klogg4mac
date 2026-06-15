@@ -381,7 +381,9 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     }
 
     @objc func toggleTextWrap(_ sender: Any?) {
-        // TODO(Phase 3): toggle text wrap in log views
+        // Flip the persisted preference; .preferencesDidChange drives each tab's
+        // applyViewPreferences() → applyTextWrapPreference() to reflow + repaint.
+        AppPreferences.shared.useTextWrap.toggle()
     }
 
     @objc func toggleFollow(_ sender: Any?) {
@@ -587,6 +589,9 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         case #selector(toggleOverview(_:)):
             menuItem.state = tabController.currentOverviewVisible ? .on : .off
             return true
+        case #selector(toggleTextWrap(_:)):
+            menuItem.state = AppPreferences.shared.useTextWrap ? .on : .off
+            return true
         case #selector(clearRecentFiles(_:)):
             return !RecentFiles.shared.paths.isEmpty
         case #selector(assignColorLabel(_:)):
@@ -660,6 +665,31 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         guard let tab = tabController.currentTab else { return }
         tab.mainView.reloadFromEngine()
         if tab.isFollowing { tab.scrollMainToEnd() }
+    }
+
+    // --- Text wrap (headless) ---
+
+    /// Toggle text wrap (flips the preference; tabs reflow via preferencesDidChange).
+    /// The live reflow path is async; apply it synchronously to the active tab's views
+    /// so headless assertions/snapshots see the new state immediately.
+    func selfTestToggleTextWrap() {
+        toggleTextWrap(nil)
+        tabController.currentTab?.mainView.applyTextWrapPreference()
+        tabController.currentTab?.filteredView.applyTextWrapPreference()
+    }
+
+    /// Whether text wrap is on (preference value).
+    var selfTestTextWrapEnabled: Bool { AppPreferences.shared.useTextWrap }
+
+    /// Whether the active tab's main view currently has wrap enabled (the view-side
+    /// flag, proving the preference reached the view).
+    var selfTestMainViewWrapEnabled: Bool {
+        tabController.currentTab?.mainView.isWrapEnabled ?? false
+    }
+
+    /// Visual-row count for main-view logical line `line` at the current wrap width.
+    func selfTestMainVisualRows(forLine line: Int) -> Int {
+        tabController.currentTab?.mainView.visualRowCount(forLine: line) ?? 0
     }
 
     // --- Overview minimap (headless) ---

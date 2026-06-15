@@ -298,14 +298,14 @@ final class AppMenu {
 
         menu.addItem(.separator())
 
-        // Text Wrap — TODO
+        // Text Wrap — soft-wrap long lines to the viewport (Wave 8).
         let wrap = menu.addItem(
             withTitle: "Text Wrap",
             action: #selector(MainWindowController.toggleTextWrap(_:)),
             keyEquivalent: "w")
         wrap.keyEquivalentModifierMask = []   // bare 'w', no modifier (klogg default)
         wrap.target = nil
-        wrap.isEnabled = false   // TODO(Phase 3)
+        wrap.state = AppPreferences.shared.useTextWrap ? .on : .off
 
         menu.addItem(.separator())
 
