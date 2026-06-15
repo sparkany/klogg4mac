@@ -56,6 +56,8 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         let nc = NotificationCenter.default
         nc.addObserver(self, selector: #selector(highlightersChanged),
                        name: .highlightersDidChange, object: nil)
+        nc.addObserver(self, selector: #selector(highlightersChanged),
+                       name: .colorLabelsDidChange, object: nil)
         nc.addObserver(self, selector: #selector(preferencesChanged),
                        name: .preferencesDidChange, object: nil)
     }
@@ -177,6 +179,12 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     /// Give keyboard focus to the search field.
     func focusSearchBar() {
         searchBar.focusSearchField()
+    }
+
+    /// Load a predefined filter into the search bar and run it (Wave 8). Drives the
+    /// exact code path a picker selection takes.
+    func applyPredefinedFilter(_ filter: PredefinedFilter) {
+        searchBar.applyFilter(filter)
     }
 
     // MARK: - QuickFind (Wave 6)
@@ -352,8 +360,23 @@ final class TabController: NSViewController {
         currentTab?.mainView.scrollToLine(line)
     }
 
+    /// Run a predefined filter in the active tab's search bar (Wave 8).
+    func applyPredefinedFilter(_ filter: PredefinedFilter) {
+        currentTab?.applyPredefinedFilter(filter)
+    }
+
     /// Line count of the active tab's main view (for Go to Line range validation).
     var currentMainLineCount: Int { currentTab?.mainView.lineCount ?? 0 }
+
+    /// Assign the active tab's selected main-view line text to colour-label `slot`
+    /// (1...9, or 0 to clear that token). Returns the labelled text, or nil if there
+    /// is no selection. The store change notification drives the repaint.
+    @discardableResult
+    func applyColorLabel(slot: Int) -> String? {
+        guard let text = currentTab?.mainView.currentSelectionText else { return nil }
+        ColorLabelsStore.shared.assign(text: text, slot: slot)
+        return text
+    }
 
     // Exposed as `_tabs` so MainWindowController can build the Opened Files menu
     // without making the internal list fully public.

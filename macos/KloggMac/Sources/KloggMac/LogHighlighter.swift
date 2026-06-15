@@ -56,8 +56,13 @@ final class LogHighlighter {
     }
 
     /// Recompile from the current HighlighterStore rules. Call when the list changes.
+    ///
+    /// Colour labels (ColorLabelsStore) are merged in as match-only rules AFTER the
+    /// user rules. Because highlight() evaluates last→first, labels are applied first
+    /// in the pass and accumulate as word matches under any later user rules — i.e. a
+    /// quick label colours just the selected token, exactly like a matchOnly rule.
     func rebuild() {
-        compiled = HighlighterStore.shared.rules.compactMap { rule in
+        var rules: [CompiledRule] = HighlighterStore.shared.rules.compactMap { rule in
             guard rule.enabled, !rule.pattern.isEmpty else { return nil }
 
             // klogg's non-regex mode is a literal substring match; escape the pattern.
@@ -74,6 +79,19 @@ final class LogHighlighter {
                                 back: rule.backColor,
                                 matchOnly: rule.matchOnly)
         }
+
+        // Colour labels: literal, case-sensitive, match-only spans coloured by slot.
+        for label in ColorLabelsStore.shared.labels {
+            guard !label.text.isEmpty else { continue }
+            let patternText = NSRegularExpression.escapedPattern(for: label.text)
+            let regex = try? NSRegularExpression(pattern: patternText, options: [])
+            rules.append(CompiledRule(regex: regex,
+                                      fore: .labelColor,
+                                      back: ColorLabelsStore.color(forSlot: label.slot),
+                                      matchOnly: true))
+        }
+
+        compiled = rules
         hasRules = !compiled.isEmpty
     }
 

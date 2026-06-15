@@ -23,6 +23,7 @@ final class SearchBarView: NSView {
 
     // MARK: - Controls
 
+    private let filterPopup   = NSPopUpButton()   // ▾ predefined filters picker
     private let searchField   = NSSearchField()
     private let caseButton    = NSButton()   // Aa — toggle case-sensitive
     private let regexButton   = NSButton()   // .* — toggle regex
@@ -39,6 +40,8 @@ final class SearchBarView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         buildSubviews()
+        // Rebuild the picker whenever the stored filters change.
+        PredefinedFilterStore.shared.onChange = { [weak self] _ in self?.reloadFilters() }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
@@ -51,6 +54,18 @@ final class SearchBarView: NSView {
         // Background matches the toolbar area.
         wantsLayer = true
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+
+        // Predefined-filters picker (▾). The first item is a static title; choosing a
+        // filter fills the field with its pattern + flags and runs the search.
+        filterPopup.translatesAutoresizingMaskIntoConstraints = false
+        filterPopup.pullsDown = true            // title item stays put; acts as a menu
+        filterPopup.bezelStyle = .rounded
+        filterPopup.font = .systemFont(ofSize: 11)
+        filterPopup.toolTip = "Predefined filters"
+        filterPopup.target = self
+        filterPopup.action = #selector(selectFilter(_:))
+        addSubview(filterPopup)
+        reloadFilters()
 
         // Search field.
         searchField.translatesAutoresizingMaskIntoConstraints = false
@@ -124,7 +139,11 @@ final class SearchBarView: NSView {
             caseButton.trailingAnchor.constraint(equalTo: regexButton.leadingAnchor, constant: -4),
             caseButton.widthAnchor.constraint(equalToConstant: 32),
 
-            searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            filterPopup.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            filterPopup.centerYAnchor.constraint(equalTo: centerYAnchor),
+            filterPopup.widthAnchor.constraint(equalToConstant: 44),
+
+            searchField.leadingAnchor.constraint(equalTo: filterPopup.trailingAnchor, constant: 6),
             searchField.centerYAnchor.constraint(equalTo: centerYAnchor),
             searchField.trailingAnchor.constraint(equalTo: caseButton.leadingAnchor, constant: -8),
         ])
@@ -156,6 +175,41 @@ final class SearchBarView: NSView {
 
     @objc private func toggleRegex(_ sender: NSButton) {
         isRegex = (sender.state == .on)
+    }
+
+    // MARK: - Predefined filters
+
+    /// Rebuild the picker menu from PredefinedFilterStore. A pull-down popup keeps its
+    /// first item as the (non-selectable) title; stored filters follow.
+    func reloadFilters() {
+        filterPopup.removeAllItems()
+        // Title item (shown on the button; ▾ glyph kept by the bezel).
+        filterPopup.addItem(withTitle: "▾")
+        for filter in PredefinedFilterStore.shared.filters {
+            filterPopup.addItem(withTitle: filter.name.isEmpty ? filter.pattern : filter.name)
+        }
+        filterPopup.isEnabled = !PredefinedFilterStore.shared.filters.isEmpty
+    }
+
+    /// A predefined filter was chosen: load its pattern + flags into the field and run.
+    @objc private func selectFilter(_ sender: NSPopUpButton) {
+        // Index 0 is the title; stored filters start at 1.
+        let idx = sender.indexOfSelectedItem - 1
+        let filters = PredefinedFilterStore.shared.filters
+        guard idx >= 0, idx < filters.count else { return }
+        applyFilter(filters[idx])
+    }
+
+    /// Load a filter's pattern + flags into the controls and trigger a search.
+    /// Exposed so the headless harness can drive the same code path as a menu pick.
+    func applyFilter(_ filter: PredefinedFilter) {
+        searchField.stringValue = filter.pattern
+        isRegex = filter.useRegex
+        isCaseInsensitive = filter.ignoreCase
+        regexButton.state = isRegex ? .on : .off
+        caseButton.state = isCaseInsensitive ? .on : .off
+        guard !filter.pattern.isEmpty else { return }
+        onSearch?(filter.pattern, isCaseInsensitive, isRegex)
     }
 
     // MARK: - Public API (called by CrawlerTab delegate methods)

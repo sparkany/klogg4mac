@@ -426,6 +426,18 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         scratchpadWC.toggle()
     }
 
+    // MARK: - Color labels (Wave 8)
+
+    /// Assign the selected line's text to the colour slot carried in the menu item's
+    /// tag (1–9). Beeps if nothing is selected.
+    @objc func assignColorLabel(_ sender: NSMenuItem) {
+        if tabController.applyColorLabel(slot: sender.tag) == nil { NSSound.beep() }
+    }
+
+    @objc func clearColorLabels(_ sender: Any?) {
+        ColorLabelsStore.shared.clearAll()
+    }
+
     // MARK: - Highlighters
 
     @objc func editHighlighters(_ sender: Any?) {
@@ -574,6 +586,11 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
             return true
         case #selector(clearRecentFiles(_:)):
             return !RecentFiles.shared.paths.isEmpty
+        case #selector(assignColorLabel(_:)):
+            // Enabled only when a main-view line is selected to label.
+            return tabController.currentTab?.mainView.currentSelectionText != nil
+        case #selector(clearColorLabels(_:)):
+            return !ColorLabelsStore.shared.labels.isEmpty
         default:
             return true
         }
@@ -640,6 +657,62 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         guard let tab = tabController.currentTab else { return }
         tab.mainView.reloadFromEngine()
         if tab.isFollowing { tab.scrollMainToEnd() }
+    }
+
+    // --- Predefined filters in search bar (headless) ---
+
+    /// Run a predefined filter in the active tab's search bar (drives the same code
+    /// path as a picker selection). The resulting search runs on the engine; tests
+    /// pump the runloop then assert on the match count.
+    func selfTestApplyPredefinedFilter(_ filter: PredefinedFilter) {
+        tabController.applyPredefinedFilter(filter)
+    }
+
+    /// Match count of the active tab's last search (filtered view line count).
+    var selfTestSearchMatchCount: Int {
+        Int(tabController.currentTab?.engine.searchMatchCount() ?? 0)
+    }
+
+    // --- Color labels (headless) ---
+
+    /// Select main-view line `line` (0-based), assign it to colour `slot`, and return
+    /// the labelled text (nil if no selection). The highlighter rebuild happens via the
+    /// colorLabelsDidChange notification; tests pump the runloop then assert.
+    @discardableResult
+    func selfTestLabelLine(_ line: Int, slot: Int) -> String? {
+        tabController.currentTab?.mainView.selectLine(line)
+        return tabController.applyColorLabel(slot: slot)
+    }
+
+    /// Number of colour labels currently stored.
+    var selfTestColorLabelCount: Int { ColorLabelsStore.shared.labels.count }
+
+    /// Whether a freshly-built LogHighlighter produces at least one coloured span for
+    /// `text` — i.e. draw() would colour the labelled token. Proves the label reaches
+    /// the render path through the same machinery the view uses.
+    func selfTestHighlighterColorsLabel(text: String) -> Bool {
+        let hl = LogHighlighter()       // rebuilds from the live stores in init
+        return !hl.highlight(line: text).isEmpty
+    }
+
+    func selfTestClearColorLabels() { ColorLabelsStore.shared.clearAll() }
+
+    /// Assign a literal token directly to a slot (for a snapshot showing a repeated
+    /// token coloured across many lines), bypassing the line-selection path.
+    func selfTestAssignLabelToken(_ token: String, slot: Int) {
+        ColorLabelsStore.shared.assign(text: token, slot: slot)
+    }
+
+    /// Clear the active tab's main-view selection so a snapshot shows label colouring
+    /// unobscured by the selection background.
+    func selfTestClearMainSelection() { tabController.currentTab?.mainView.clearSelection() }
+
+    /// Force the active tab's log views to rebuild compiled highlighter+label rules
+    /// (the live path runs async via colorLabelsDidChange; tests need it synchronous
+    /// before a snapshot).
+    func selfTestRebuildHighlighters() {
+        tabController.currentTab?.mainView.applyHighlighters()
+        tabController.currentTab?.filteredView.applyHighlighters()
     }
 
     // --- Encoding (headless) ---

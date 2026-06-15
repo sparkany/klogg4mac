@@ -346,6 +346,30 @@ final class AppMenu {
 
         menu.addItem(.separator())
 
+        // Colour Labels submenu — quick-assign a colour to the selected line's text
+        // (⌘1–⌘9), plus a clear-all item. Mirrors klogg's ColorLabelsManager.
+        let labelsItem = NSMenuItem(title: "Color Labels", action: nil, keyEquivalent: "")
+        let labelsMenu = NSMenu(title: "Color Labels")
+        for slot in 1...ColorLabelsStore.slotCount {
+            let it = labelsMenu.addItem(
+                withTitle: "Label Selection — Color \(slot)",
+                action: #selector(MainWindowController.assignColorLabel(_:)),
+                keyEquivalent: "\(slot)")
+            it.keyEquivalentModifierMask = [.command]
+            it.tag = slot
+            it.target = nil
+        }
+        labelsMenu.addItem(.separator())
+        let clearLabels = labelsMenu.addItem(
+            withTitle: "Clear All Color Labels",
+            action: #selector(MainWindowController.clearColorLabels(_:)),
+            keyEquivalent: "")
+        clearLabels.target = nil
+        labelsItem.submenu = labelsMenu
+        menu.addItem(labelsItem)
+
+        menu.addItem(.separator())
+
         // Scratchpad (toggle show/hide)
         menu.addItem(
             withTitle: "Scratchpad",

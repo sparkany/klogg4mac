@@ -22,6 +22,8 @@ enum SelfTest {
         out += "\n" + followTests(wc)
         out += "\n" + encodingTests(wc)
         out += "\n" + sessionTests()
+        out += "\n" + colorLabelTests(wc)
+        out += "\n" + predefinedFilterTests(wc)
         out += "===== END SELFTEST =====\n"
         FileHandle.standardError.write(out.data(using: .utf8)!)
     }
@@ -323,6 +325,102 @@ enum SelfTest {
         s += changedToUtf16
             ? "PASS forced UTF-16 re-index changed count: \(latinCount) -> \(utf16Count)\n"
             : "FAIL forced UTF-16 did not change count: stayed \(utf16Count) (expected != \(latinCount))\n"
+
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Color label tests (Wave 8)
+
+    /// Prove colour labels: open a file with a repeated token, select a line, assign it
+    /// to a colour slot, and verify (a) the store records the label, (b) a freshly-built
+    /// LogHighlighter colours that token (so draw() would paint it), and (c) clear works.
+    /// Also snapshots the labelled view offscreen.
+    private static func colorLabelTests(_ wc: MainWindowController) -> String {
+        var s = "--- COLOR LABEL TESTS ---\n"
+        ColorLabelsStore.shared.clearAll()
+
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-labels-\(UUID().uuidString).log")
+        let body = (1...12).map { "ERROR token line \($0)" }.joined(separator: "\n") + "\n"
+        guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write label test file\n"
+        }
+        defer {
+            try? FileManager.default.removeItem(atPath: path)
+            wc.selfTestClearColorLabels()
+        }
+
+        wc.selfTestOpen(path)
+        wait(timeout: 5.0) { wc.selfTestCurrentLineCount >= 12 }
+
+        // Select line 0 and assign colour slot 3.
+        let labelled = wc.selfTestLabelLine(0, slot: 3)
+        wait(timeout: 1.0) { wc.selfTestColorLabelCount == 1 }
+        s += (labelled != nil && wc.selfTestColorLabelCount == 1)
+            ? "PASS assigned label: \"\(labelled ?? "")\" → slot 3 (count=\(wc.selfTestColorLabelCount))\n"
+            : "FAIL assign label (text=\(labelled ?? "nil") count=\(wc.selfTestColorLabelCount))\n"
+
+        // The highlighter must colour the labelled token (proves it reaches draw()).
+        let colours = labelled.map { wc.selfTestHighlighterColorsLabel(text: $0) } ?? false
+        s += colours
+            ? "PASS highlighter colours the labelled token (draw() picks it up)\n"
+            : "FAIL highlighter does not colour the labelled token\n"
+
+        // For a visible snapshot, also label the repeated "ERROR" token (slot 8 = red)
+        // and clear the selection so the colour band isn't masked by the selection wash.
+        wc.selfTestAssignLabelToken("ERROR", slot: 8)
+        wait(timeout: 1.0) { wc.selfTestColorLabelCount == 2 }
+        wc.selfTestClearMainSelection()
+        wc.selfTestRebuildHighlighters()    // live rebuild is async; force it here
+        let dir = ProcessInfo.processInfo.environment["KLOGG_SNAPSHOT_DIR"] ?? NSTemporaryDirectory()
+        let snap = (dir as NSString).appendingPathComponent("klogg-snapshot-colorlabel.png")
+        s += wc.selfTestSnapshot(to: snap) ? "PASS wrote \(snap)\n" : "FAIL colour-label snapshot\n"
+
+        // Clear and assert the highlighter no longer colours the token.
+        wc.selfTestClearColorLabels()
+        wait(timeout: 1.0) { wc.selfTestColorLabelCount == 0 }
+        let stillColours = labelled.map { wc.selfTestHighlighterColorsLabel(text: $0) } ?? true
+        s += (wc.selfTestColorLabelCount == 0 && !stillColours)
+            ? "PASS clear removes the label (highlighter no longer colours it)\n"
+            : "FAIL clear (count=\(wc.selfTestColorLabelCount) stillColours=\(stillColours))\n"
+
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Predefined filter tests (Wave 8)
+
+    /// Prove the predefined-filter picker: open a file with a known number of matching
+    /// lines, store a predefined filter, apply it (the picker code path), and assert the
+    /// engine search returns the expected match count.
+    private static func predefinedFilterTests(_ wc: MainWindowController) -> String {
+        var s = "--- PREDEFINED FILTER TESTS ---\n"
+
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-pf-\(UUID().uuidString).log")
+        // 5 ERROR lines + 7 INFO lines.
+        var lines: [String] = []
+        for i in 1...5 { lines.append("ERROR failure \(i)") }
+        for i in 1...7 { lines.append("INFO ok \(i)") }
+        let body = lines.joined(separator: "\n") + "\n"
+        guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write predefined-filter test file\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        wc.selfTestOpen(path)
+        wait(timeout: 5.0) { wc.selfTestCurrentLineCount >= 12 }
+
+        // Apply a predefined filter matching the 5 ERROR lines.
+        let filter = PredefinedFilter(name: "Errors", pattern: "ERROR",
+                                      ignoreCase: false, useRegex: false)
+        wc.selfTestApplyPredefinedFilter(filter)
+        let got = wait(timeout: 5.0) { wc.selfTestSearchMatchCount == 5 }
+        let count = wc.selfTestSearchMatchCount
+        s += got
+            ? "PASS predefined filter \"ERROR\" ran search → \(count) matches (expected 5)\n"
+            : "FAIL predefined filter search: got \(count) matches (expected 5)\n"
 
         wc.closeCurrentTab(nil)
         return s

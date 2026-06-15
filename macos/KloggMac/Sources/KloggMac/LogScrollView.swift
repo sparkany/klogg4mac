@@ -96,12 +96,29 @@ final class LogScrollView: NSScrollView {
         docView.selectAndScrollToLine(line)
     }
 
+    /// Select `line` without scrolling (headless tests / programmatic selection).
+    /// Syncs the view's line count from the engine first so the selection isn't
+    /// rejected when the view hasn't been laid out yet (headless path).
+    func selectLine(_ line: Int) {
+        reloadFromEngine()
+        docView.selectAndScrollToLine(line)
+    }
+
+    /// Clear the current selection and repaint (headless tests).
+    func clearSelection() {
+        docView.clearSelectionForTest()
+    }
+
     /// 0-based index of the currently selected/anchored line, or nil if none.
     /// Used by QuickFind to start searching from the current position.
     var currentLine: Int? { docView.currentSelectedLine }
 
     /// Number of lines this view currently displays.
     var lineCount: Int { docView.currentLineCount }
+
+    /// Text of the first currently-selected line (trimmed), or nil if nothing is
+    /// selected. Used by the colour-label feature to label the selected token.
+    var currentSelectionText: String? { docView.currentSelectionText }
 
     // MARK: - Search / QuickFind highlight (Wave 6)
 
@@ -289,6 +306,23 @@ final class LogDocumentView: NSView {
     /// 0-based extent (caret) of the current selection; nil when nothing selected.
     /// QuickFind reads this to start its incremental find from the current position.
     var currentSelectedLine: Int? { selection.state.extentLine }
+
+    /// Trimmed text of the first selected line, fetched from the engine. nil when no
+    /// selection. Drives the colour-label feature (label the selected token).
+    var currentSelectionText: String? {
+        guard let range = selection.state.normalizedRange else { return nil }
+        let lo = max(0, min(range.lowerBound, currentLineCount - 1))
+        // Prefer the draw cache; fall back to a single-line engine fetch.
+        let raw = visibleLineCache[lo] ?? {
+            let r = NSRange(location: lo, length: 1)
+            switch mode {
+            case .main:     return engine.lines(in: r, expandTabs: true).first
+            case .filtered: return engine.filteredLines(in: r, expandTabs: true).first
+            }
+        }() ?? ""
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 
     // MARK: - Init
 
@@ -613,6 +647,12 @@ final class LogDocumentView: NSView {
     private func scrollLineToVisible(_ line: Int) {
         let y = CGFloat(line) * rowHeight
         scrollToVisible(NSRect(x: 0, y: y, width: 1, height: rowHeight))
+    }
+
+    /// Clear the selection and repaint (headless tests).
+    func clearSelectionForTest() {
+        selection.clear()
+        needsDisplay = true
     }
 
     /// Select `line` and scroll it into view (called by LogScrollView.scrollToLine).
