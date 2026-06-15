@@ -109,8 +109,9 @@ final class AppToolbar: NSObject, NSToolbarDelegate {
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "File Info"
             item.view = statusBar
-            item.minSize = NSSize(width: 200, height: 22)
-            item.maxSize = NSSize(width: 2000, height: 22)
+            // Let the view's intrinsic content size / constraints govern sizing.
+            // (minSize/maxSize deprecated in macOS 12; constraints on the view are preferred.)
+            statusBar.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
             return item
 
         case .kloggStop:

@@ -1,0 +1,192 @@
+//
+//  SearchBarView.swift — search toolbar strip above the split log views.
+//
+//  Layout (left to right):
+//    [Search field ···········] [Aa case] [.* regex] [match label] [spinner]
+//
+//  Callbacks:
+//    onSearch(pattern, caseInsensitive, isRegex)  — called on Return / button tap
+//    onCancel()                                   — called when spinner (× button) tapped
+//
+//  This view does not call the engine directly; CrawlerTab owns the engine and
+//  sets the callbacks.
+//
+
+import AppKit
+
+final class SearchBarView: NSView {
+
+    // MARK: - Callbacks (set by CrawlerTab)
+
+    var onSearch: ((_ pattern: String, _ caseInsensitive: Bool, _ isRegex: Bool) -> Void)?
+    var onCancel: (() -> Void)?
+
+    // MARK: - Controls
+
+    private let searchField   = NSSearchField()
+    private let caseButton    = NSButton()   // Aa — toggle case-sensitive
+    private let regexButton   = NSButton()   // .* — toggle regex
+    private let matchLabel    = NSTextField()
+    private let spinner       = NSProgressIndicator()
+
+    // MARK: - State
+
+    private var isCaseInsensitive: Bool = true   // matches klogg default
+    private var isRegex: Bool = false
+
+    // MARK: - Init
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        buildSubviews()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    // MARK: - Layout
+
+    private func buildSubviews() {
+        translatesAutoresizingMaskIntoConstraints = false
+
+        // Background matches the toolbar area.
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+
+        // Search field.
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchField.placeholderString = "Search (regex / plain text)"
+        searchField.sendsSearchStringImmediately = false
+        searchField.target = self
+        searchField.action = #selector(searchAction(_:))
+        addSubview(searchField)
+
+        // Case-insensitive toggle button (Aa).
+        caseButton.translatesAutoresizingMaskIntoConstraints = false
+        caseButton.title = "Aa"
+        caseButton.setButtonType(.toggle)
+        caseButton.bezelStyle = .rounded
+        caseButton.font = .systemFont(ofSize: 11)
+        caseButton.state = isCaseInsensitive ? .on : .off
+        caseButton.toolTip = "Case insensitive"
+        caseButton.target = self
+        caseButton.action = #selector(toggleCase(_:))
+        addSubview(caseButton)
+
+        // Regex toggle button (.*).
+        regexButton.translatesAutoresizingMaskIntoConstraints = false
+        regexButton.title = ".*"
+        regexButton.setButtonType(.toggle)
+        regexButton.bezelStyle = .rounded
+        regexButton.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        regexButton.state = isRegex ? .on : .off
+        regexButton.toolTip = "Regular expression"
+        regexButton.target = self
+        regexButton.action = #selector(toggleRegex(_:))
+        addSubview(regexButton)
+
+        // Match count label.
+        matchLabel.translatesAutoresizingMaskIntoConstraints = false
+        matchLabel.isEditable = false
+        matchLabel.isBordered = false
+        matchLabel.drawsBackground = false
+        matchLabel.alignment = .left
+        matchLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        matchLabel.textColor = .secondaryLabelColor
+        matchLabel.stringValue = ""
+        addSubview(matchLabel)
+
+        // Spinner (hidden until a search is running).
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        addSubview(spinner)
+
+        // Height: compact — 28 pt like a toolbar.
+        let height: CGFloat = 28
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: height),
+
+            spinner.centerYAnchor.constraint(equalTo: centerYAnchor),
+            spinner.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            spinner.widthAnchor.constraint(equalToConstant: 16),
+            spinner.heightAnchor.constraint(equalToConstant: 16),
+
+            matchLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            matchLabel.trailingAnchor.constraint(equalTo: spinner.leadingAnchor, constant: -6),
+            matchLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 80),
+
+            regexButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            regexButton.trailingAnchor.constraint(equalTo: matchLabel.leadingAnchor, constant: -6),
+            regexButton.widthAnchor.constraint(equalToConstant: 32),
+
+            caseButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            caseButton.trailingAnchor.constraint(equalTo: regexButton.leadingAnchor, constant: -4),
+            caseButton.widthAnchor.constraint(equalToConstant: 32),
+
+            searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            searchField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            searchField.trailingAnchor.constraint(equalTo: caseButton.leadingAnchor, constant: -8),
+        ])
+
+        // Bottom separator line.
+        let sep = NSBox()
+        sep.translatesAutoresizingMaskIntoConstraints = false
+        sep.boxType = .separator
+        addSubview(sep)
+        NSLayoutConstraint.activate([
+            sep.leadingAnchor.constraint(equalTo: leadingAnchor),
+            sep.trailingAnchor.constraint(equalTo: trailingAnchor),
+            sep.bottomAnchor.constraint(equalTo: bottomAnchor),
+            sep.heightAnchor.constraint(equalToConstant: 1),
+        ])
+    }
+
+    // MARK: - Actions
+
+    @objc private func searchAction(_ sender: NSSearchField) {
+        let pattern = sender.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !pattern.isEmpty else { return }
+        onSearch?(pattern, isCaseInsensitive, isRegex)
+    }
+
+    @objc private func toggleCase(_ sender: NSButton) {
+        isCaseInsensitive = (sender.state == .on)
+    }
+
+    @objc private func toggleRegex(_ sender: NSButton) {
+        isRegex = (sender.state == .on)
+    }
+
+    // MARK: - Public API (called by CrawlerTab delegate methods)
+
+    /// Move keyboard focus to the search text field.
+    func focusSearchField() {
+        window?.makeFirstResponder(searchField)
+    }
+
+    /// Show or hide the spinner.
+    func showProgress(_ running: Bool) {
+        if running {
+            spinner.startAnimation(nil)
+        } else {
+            spinner.stopAnimation(nil)
+        }
+    }
+
+    /// Update the match-count label.
+    /// - Parameters:
+    ///   - count: Number of matches found so far.
+    ///   - finished: True when search has completed; false for interim progress.
+    func updateMatchCount(_ count: Int, finished: Bool) {
+        if count == 0 && !finished {
+            matchLabel.stringValue = ""
+        } else if finished {
+            matchLabel.stringValue = count == 1 ? "1 match" : "\(count) matches"
+            matchLabel.textColor = count == 0 ? .systemRed : .secondaryLabelColor
+        } else {
+            matchLabel.stringValue = "\(count)…"
+            matchLabel.textColor = .secondaryLabelColor
+        }
+    }
+}

@@ -27,6 +27,13 @@ import KloggBridge
 
 // MARK: - LogScrollView (public container)
 
+/// Whether this scroll view displays raw log lines (from LogData) or the
+/// filtered search-match lines (from LogFilteredData).
+enum LogViewMode {
+    case main       // reads engine.lines(in:expandTabs:) and engine.lineCount
+    case filtered   // reads engine.filteredLines(in:expandTabs:) and engine.searchMatchCount
+}
+
 /// Drop-in replacement for NSScrollView that hosts the log document view,
 /// the floating line-number gutter, and wires engine callbacks.
 final class LogScrollView: NSScrollView {
@@ -36,8 +43,8 @@ final class LogScrollView: NSScrollView {
     /// Guards the one-shot stub auto-load (shared across all instances of this class).
     private static var stubAutoLoadFired = false
 
-    init(engine: KloggEngine) {
-        docView = LogDocumentView(engine: engine)
+    init(engine: KloggEngine, mode: LogViewMode = .main) {
+        docView = LogDocumentView(engine: engine, mode: mode)
         gutter  = LogLineNumberGutter(font: docView.logFont, rowHeight: docView.rowHeight)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -75,11 +82,12 @@ final class LogScrollView: NSScrollView {
         docView.engine.openFile(atPath: "stub://1M-lines")
     }
 
-    /// Called by MainWindowController (and engine delegate) after a file loads.
-    func reloadFromEngine() {
-        let lineCount = Int(docView.engine.lineCount())
-        let widthChanged = gutter.updateWidth(for: lineCount)
-        docView.refreshSizing(lineCount: lineCount)
+    /// Called after a file loads or a search completes.
+    /// Pass `lineCount` explicitly so the filtered view can pass match count.
+    func reloadFromEngine(lineCount: Int? = nil) {
+        let count = lineCount ?? docView.effectiveLineCount()
+        let widthChanged = gutter.updateWidth(for: count)
+        docView.refreshSizing(lineCount: count)
         if widthChanged {
             // Force doc view to re-lay-out its frame with the new gutter width.
             docView.invalidateIntrinsicContentSize()
@@ -131,6 +139,7 @@ final class LogDocumentView: NSView {
     // MARK: Internal references
 
     let engine: KloggEngine
+    let mode: LogViewMode
     /// Set by LogScrollView after construction.
     weak var gutterView: LogLineNumberGutter?
 
@@ -161,8 +170,9 @@ final class LogDocumentView: NSView {
 
     // MARK: - Init
 
-    init(engine: KloggEngine) {
+    init(engine: KloggEngine, mode: LogViewMode = .main) {
         self.engine = engine
+        self.mode   = mode
         // Use typographic line height: ascender + |descender| + leading, rounded up + 2px.
         let ascender  = logFont.ascender
         let descender = abs(logFont.descender)
@@ -171,6 +181,16 @@ final class LogDocumentView: NSView {
         // For a monospaced font, character advance is uniform across all glyphs.
         charWidth = logFont.advancement(forGlyph: logFont.glyph(withName: "M")).width
         super.init(frame: .zero)
+    }
+
+    /// Returns the current line count for this view's mode.
+    func effectiveLineCount() -> Int {
+        switch mode {
+        case .main:
+            return Int(engine.lineCount())
+        case .filtered:
+            return Int(engine.searchMatchCount())
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
@@ -208,8 +228,14 @@ final class LogDocumentView: NSView {
         guard firstRow <= lastRow else { return }
 
         // Fetch visible lines from engine (O(visible rows)).
-        let range  = NSRange(location: firstRow, length: lastRow - firstRow + 1)
-        let fetched = engine.lines(in: range, expandTabs: true)
+        let range = NSRange(location: firstRow, length: lastRow - firstRow + 1)
+        let fetched: [String]
+        switch mode {
+        case .main:
+            fetched = engine.lines(in: range, expandTabs: true)
+        case .filtered:
+            fetched = engine.filteredLines(in: range, expandTabs: true)
+        }
 
         // X offset: gutter takes the left portion of the doc view coordinate space.
         let gutterWidth = gutterView?.gutterWidth ?? 0
@@ -354,9 +380,15 @@ final class LogDocumentView: NSView {
         let chunkSize = 10_000
         var cursor    = lo
         while cursor <= hi {
-            let batchEnd    = min(cursor + chunkSize - 1, hi)
-            let nsRange     = NSRange(location: cursor, length: batchEnd - cursor + 1)
-            let fetched     = engine.lines(in: nsRange, expandTabs: true)
+            let batchEnd = min(cursor + chunkSize - 1, hi)
+            let nsRange  = NSRange(location: cursor, length: batchEnd - cursor + 1)
+            let fetched: [String]
+            switch mode {
+            case .main:
+                fetched = engine.lines(in: nsRange, expandTabs: true)
+            case .filtered:
+                fetched = engine.filteredLines(in: nsRange, expandTabs: true)
+            }
             parts.append(contentsOf: fetched)
             cursor = batchEnd + 1
         }

@@ -25,6 +25,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)kloggEngine:(id)engine loadingFinished:(BOOL)success;
 /// Delivered on the main thread when a search completes; `matchCount` is total hits.
 - (void)kloggEngine:(id)engine searchFinished:(NSUInteger)matchCount;
+/// Delivered periodically during search; `matchCount` hits so far, `percent` 0-100.
+/// Always on the main thread. Optional — implement for a live-updating count display.
+- (void)kloggEngine:(id)engine searchProgressed:(NSUInteger)matchCount percent:(int)percent;
 @end
 
 /// Thin owner of one open log file. One instance per tab/document.
@@ -51,6 +54,20 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)searchWithPattern:(NSString *)pattern
               caseInsensitive:(BOOL)caseInsensitive
                         regex:(BOOL)isRegex;
+
+// MARK: - Filtered data access (valid after searchFinished)
+
+/// Number of matching lines from the last search (0 if no search done).
+- (NSUInteger)searchMatchCount;
+
+/// The original source-file line index (0-based) for match at `matchIndex`.
+/// Returns NSNotFound if out of range.
+- (NSUInteger)searchMatchLineAtIndex:(NSUInteger)matchIndex;
+
+/// Text of filtered matches in `range` (indices into the match list, not source lines).
+/// Equivalent to linesInRange but reading from LogFilteredData.
+/// Never nil; may be short if range exceeds match count.
+- (NSArray<NSString *> *)filteredLinesInRange:(NSRange)range expandTabs:(BOOL)expand;
 
 /// Cancel any in-flight open/index/search.
 - (void)cancel;

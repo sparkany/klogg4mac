@@ -30,7 +30,6 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
             defer: false)
         window.title = KloggEngine.isStub ? "klogg (stub engine)" : "klogg"
         window.center()
-        window.setFrameAutosaveName("klogg.mainWindow")
         super.init(window: window)
 
         buildContent()
@@ -47,9 +46,24 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     // MARK: - Window content
 
     private func buildContent() {
-        // Set TabController as the window's content view controller; AppKit
-        // will call loadView() on it and size the view to fill the content area.
-        window?.contentViewController = tabController
+        guard let window = window else { return }
+
+        // Load the tab controller's view, then embed it manually so the window
+        // keeps its explicitly-set frame (contentViewController resizes the window
+        // to fit the VC's minimum size, which collapses NSTabView to ~1x84).
+        tabController.loadViewIfNeeded()
+        let tabView = tabController.view
+        tabView.translatesAutoresizingMaskIntoConstraints = false
+        window.contentView?.addSubview(tabView)
+        if let cv = window.contentView {
+            NSLayoutConstraint.activate([
+                tabView.topAnchor.constraint(equalTo: cv.topAnchor),
+                tabView.bottomAnchor.constraint(equalTo: cv.bottomAnchor),
+                tabView.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
+                tabView.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
+            ])
+        }
+        window.minSize = NSSize(width: 600, height: 400)
     }
 
     private func wireToolbar() {
@@ -209,7 +223,7 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     }
 
     @objc func openQuickFind(_ sender: Any?) {
-        // TODO(Phase 3): activate QuickFind bar
+        tabController.focusSearchBar()
     }
 
     @objc func goToLine(_ sender: Any?) {
@@ -332,6 +346,9 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
             return hasFile
         case #selector(copyPathToClipboard(_:)),
              #selector(openContainingFolder(_:)):
+            return hasFile
+        case #selector(openQuickFind(_:)),
+             #selector(stopLoading(_:)):
             return hasFile
         case #selector(clearRecentFiles(_:)):
             return !RecentFiles.shared.paths.isEmpty

@@ -20,13 +20,14 @@ import KloggBridge
 
 // MARK: - CrawlerTab
 
-/// One tab: an engine + split-view hosting main log view + filtered view.
+/// One tab: an engine + search bar + split-view hosting main log view + filtered view.
 final class CrawlerTab: NSViewController, KloggEngineDelegate {
 
     let engine: KloggEngine
     let filePath: String
     let mainView: LogScrollView
     let filteredView: LogScrollView
+    private let searchBar = SearchBarView()
 
     // Callbacks fired on the main thread.
     var onLoadingFinished: ((CrawlerTab, Bool) -> Void)?
@@ -35,8 +36,8 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     init(filePath: String) {
         self.filePath = filePath
         self.engine = KloggEngine()
-        self.mainView = LogScrollView(engine: engine)
-        self.filteredView = LogScrollView(engine: engine)
+        self.mainView    = LogScrollView(engine: engine, mode: .main)
+        self.filteredView = LogScrollView(engine: engine, mode: .filtered)
         super.init(nibName: nil, bundle: nil)
         engine.delegate = self
     }
@@ -44,18 +45,59 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
 
     override func loadView() {
+        // Outer stack: search bar on top, then the log split below.
         let split = NSSplitView(frame: .zero)
         split.isVertical = false      // stacked: main above, filtered below
         split.dividerStyle = .thin
         split.addArrangedSubview(mainView)
         split.addArrangedSubview(filteredView)
-        self.view = split
+
+        searchBar.translatesAutoresizingMaskIntoConstraints = false
+        split.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSView(frame: .zero)
+        container.addSubview(searchBar)
+        container.addSubview(split)
+        NSLayoutConstraint.activate([
+            searchBar.topAnchor.constraint(equalTo: container.topAnchor),
+            searchBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            searchBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            split.topAnchor.constraint(equalTo: searchBar.bottomAnchor),
+            split.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            split.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            split.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+        ])
+        self.view = container
 
         // Defer the divider position until the view has a real size.
         DispatchQueue.main.async { [weak split] in
             guard let split = split, split.bounds.height > 0 else { return }
             split.setPosition(split.bounds.height * 0.7, ofDividerAt: 0)
         }
+
+        // Wire search bar actions.
+        searchBar.onSearch = { [weak self] pattern, caseInsensitive, isRegex in
+            self?.startSearch(pattern: pattern,
+                              caseInsensitive: caseInsensitive,
+                              isRegex: isRegex)
+        }
+        searchBar.onCancel = { [weak self] in
+            self?.engine.cancel()
+        }
+    }
+
+    // MARK: - Search
+
+    private func startSearch(pattern: String, caseInsensitive: Bool, isRegex: Bool) {
+        searchBar.showProgress(true)
+        engine.search(withPattern: pattern,
+                      caseInsensitive: caseInsensitive,
+                      regex: isRegex)
+    }
+
+    /// Give keyboard focus to the search field.
+    func focusSearchBar() {
+        searchBar.focusSearchField()
     }
 
     // MARK: - KloggEngineDelegate
@@ -67,6 +109,16 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     func kloggEngine(_ engine: Any, loadingFinished success: Bool) {
         mainView.reloadFromEngine()
         onLoadingFinished?(self, success)
+    }
+
+    func kloggEngine(_ engine: Any, searchProgressed matchCount: UInt, percent: Int32) {
+        searchBar.updateMatchCount(Int(matchCount), finished: false)
+    }
+
+    func kloggEngine(_ engine: Any, searchFinished matchCount: UInt) {
+        searchBar.showProgress(false)
+        searchBar.updateMatchCount(Int(matchCount), finished: true)
+        filteredView.reloadFromEngine(lineCount: Int(matchCount))
     }
 }
 
@@ -92,6 +144,11 @@ final class TabController: NSViewController {
     var currentLineCount: Int {
         guard let tab = currentTab else { return 0 }
         return Int(tab.engine.lineCount())
+    }
+
+    /// Focus the search bar in the active tab (wired from Edit > Find).
+    func focusSearchBar() {
+        currentTab?.focusSearchBar()
     }
 
     // Exposed as `_tabs` so MainWindowController can build the Opened Files menu
