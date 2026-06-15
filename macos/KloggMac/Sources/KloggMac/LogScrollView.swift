@@ -60,11 +60,13 @@ final class LogScrollView: NSScrollView {
         borderType            = .noBorder
         documentView          = docView
 
-        // Pass gutter into docView so it can resize the text column.
+        // The gutter is NOT added to the view tree. It is kept only as a width
+        // calculator; the line numbers are painted by LogDocumentView itself,
+        // pinned to the left edge of the viewport. (Adding a sibling view to the
+        // NSClipView alongside the documentView stopped the documentView from
+        // rendering at all — hiding every log line — so the gutter is drawn inline.)
         docView.gutterView = gutter
 
-        // Gutter lives inside the clip view so it moves with horizontal scrolling.
-        contentView.addSubview(gutter)
         contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(
             self,
@@ -92,54 +94,23 @@ final class LogScrollView: NSScrollView {
     /// Scroll to make `line` visible and select it.
     func scrollToLine(_ line: Int) {
         docView.selectAndScrollToLine(line)
-        updateGutterFrame()
     }
 
     /// Called after a file loads or a search completes.
     /// Pass `lineCount` explicitly so the filtered view can pass match count.
     func reloadFromEngine(lineCount: Int? = nil) {
         let count = lineCount ?? docView.effectiveLineCount()
-        let widthChanged = gutter.updateWidth(for: count)
+        gutter.updateWidth(for: count)        // recompute gutter width for digit count
         docView.refreshSizing(lineCount: count)
-        if widthChanged {
-            // Force doc view to re-lay-out its frame with the new gutter width.
-            docView.invalidateIntrinsicContentSize()
-        }
-        updateGutterFrame()
         docView.needsDisplay = true
     }
 
-    // MARK: - Gutter layout
+    // MARK: - Scroll tracking
 
+    /// On any scroll (including horizontal), repaint so the inline gutter — which is
+    /// pinned to the viewport's left edge — follows the scroll position.
     @objc private func boundsChanged() {
-        updateGutterFrame()
         docView.needsDisplay = true
-    }
-
-    /// Keep the gutter pinned to the left of the visible area and flush top.
-    private func updateGutterFrame() {
-        let visibleRect = contentView.bounds
-        let gutterW     = gutter.gutterWidth
-
-        // The gutter is positioned in the clip view coordinate space — it scrolls
-        // horizontally with content (so it always hugs the left edge of the viewport)
-        // but stays at the top visually.
-        gutter.frame = NSRect(
-            x: visibleRect.minX,
-            y: visibleRect.minY,
-            width: gutterW,
-            height: visibleRect.height)
-
-        // Keep the gutter on top of the document view.
-        contentView.sortSubviews({ v1, v2, _ in
-            (v1 is LogLineNumberGutter) ? .orderedDescending : .orderedAscending
-        }, context: nil)
-
-        // Communicate scroll position to gutter for its number labels.
-        let firstLine = Int(floor(visibleRect.minY / docView.rowHeight))
-        gutter.firstVisibleLine = max(0, firstLine)
-        gutter.lineCount        = docView.currentLineCount
-        gutter.needsDisplay     = true
     }
 }
 
@@ -253,7 +224,6 @@ final class LogDocumentView: NSView {
             fetched = engine.filteredLines(in: range, expandTabs: true)
         }
 
-        // X offset: gutter takes the left portion of the doc view coordinate space.
         let gutterWidth = gutterView?.gutterWidth ?? 0
         let textX       = gutterWidth + textLeftPadding
 
@@ -267,15 +237,14 @@ final class LogDocumentView: NSView {
             .foregroundColor: NSColor.selectedTextColor,
         ]
 
+        // 1) Row backgrounds (selection) + text.
         for (offset, lineText) in fetched.enumerated() {
             let row = firstRow + offset
             let y   = CGFloat(row) * rowHeight
 
             if selection.state.contains(line: row) {
-                // Draw selection background across the full row.
                 NSColor.selectedTextBackgroundColor.setFill()
-                NSRect(x: gutterWidth, y: y,
-                       width: bounds.width - gutterWidth, height: rowHeight).fill()
+                NSRect(x: 0, y: y, width: bounds.width, height: rowHeight).fill()
                 (lineText as NSString).draw(at: NSPoint(x: textX, y: y),
                                             withAttributes: selectedAttrs)
             } else {
@@ -285,6 +254,53 @@ final class LogDocumentView: NSView {
 
             // Cache for fast copy access.
             visibleLineCache[row] = lineText
+        }
+
+        // 2) Line-number gutter, painted last so it overlays the text and stays
+        //    pinned to the viewport's left edge as the content scrolls horizontally.
+        if gutterWidth > 0 {
+            drawGutter(dirtyRect: dirtyRect, firstRow: firstRow, lastRow: lastRow,
+                       gutterWidth: gutterWidth)
+        }
+    }
+
+    /// Paint the line-number gutter band at the left edge of the visible viewport.
+    /// Drawn in document coordinates but offset by the clip view's horizontal scroll
+    /// so it appears frozen at the left (klogg's abstractlogview left margin).
+    private func drawGutter(dirtyRect: NSRect, firstRow: Int, lastRow: Int,
+                            gutterWidth: CGFloat) {
+        let scrollX = enclosingScrollView?.contentView.bounds.origin.x ?? 0
+        let band = NSRect(x: scrollX, y: dirtyRect.minY,
+                          width: gutterWidth, height: dirtyRect.height)
+
+        (NSColor(named: NSColor.Name("gutterBackground")) ?? NSColor.controlBackgroundColor).setFill()
+        band.fill()
+
+        // Separator rule on the gutter's right edge.
+        NSColor.separatorColor.setFill()
+        NSRect(x: scrollX + gutterWidth - 1, y: dirtyRect.minY,
+               width: 1, height: dirtyRect.height).fill()
+
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: logFont,
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        let innerPad: CGFloat = 6
+        for row in firstRow ... lastRow {
+            // In the filtered view, show each match's ORIGINAL source line number
+            // (as klogg does); in the main view, the row index is the line number.
+            let displayNum: Int
+            if mode == .filtered {
+                let src = engine.searchMatchLine(at: UInt(row))
+                displayNum = (src == UInt.max) ? (row + 1) : Int(src) + 1
+            } else {
+                displayNum = row + 1
+            }
+            let label = "\(displayNum)" as NSString
+            let size  = label.size(withAttributes: attrs)
+            let x = scrollX + gutterWidth - innerPad - size.width
+            let y = CGFloat(row) * rowHeight + (rowHeight - size.height) / 2
+            label.draw(at: NSPoint(x: x, y: y), withAttributes: attrs)
         }
     }
 
