@@ -206,24 +206,22 @@ final class AppMenu {
 
         menu.addItem(.separator())
 
-        // Find — TODO Phase 3 (QuickFind)
+        // Find — QuickFind incremental find bar (Wave 6).
         let find = menu.addItem(
             withTitle: "Find…",
             action: #selector(MainWindowController.openQuickFind(_:)),
             keyEquivalent: "f")
-        find.target = nil
-        find.isEnabled = false   // TODO(Phase 3)
+        find.target = nil   // resolved via the responder chain to MainWindowController
 
         menu.addItem(.separator())
 
-        // Go to Line — TODO Phase 3
+        // Go to Line — modal sheet (Wave 6).
         let goToLine = menu.addItem(
             withTitle: "Go to Line…",
             action: #selector(MainWindowController.goToLine(_:)),
             keyEquivalent: "g")
         goToLine.keyEquivalentModifierMask = [.command]
         goToLine.target = nil
-        goToLine.isEnabled = false   // TODO(Phase 3)
 
         menu.addItem(.separator())
 

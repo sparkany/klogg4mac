@@ -229,11 +229,45 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     }
 
     @objc func openQuickFind(_ sender: Any?) {
-        tabController.focusSearchBar()
+        tabController.showQuickFind()
     }
 
     @objc func goToLine(_ sender: Any?) {
-        // TODO(Phase 3): show go-to-line dialog
+        guard let window = window else { return }
+        let lineCount = tabController.currentMainLineCount
+        guard lineCount > 0 else { NSSound.beep(); return }
+
+        // Build a compact accessory: a label + a numeric text field.
+        let alert = NSAlert()
+        alert.messageText = "Go to Line"
+        alert.informativeText = "Enter a line number (1–\(lineCount)):"
+        alert.addButton(withTitle: "Go")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        field.alignment = .left
+        field.placeholderString = "Line number"
+        // Accept only digits.
+        let fmt = NumberFormatter()
+        fmt.numberStyle = .none
+        fmt.allowsFloats = false
+        fmt.minimum = 1
+        fmt.maximum = NSNumber(value: lineCount)
+        field.formatter = fmt
+        alert.accessoryView = field
+        // Make the field first responder when the sheet appears.
+        alert.window.initialFirstResponder = field
+
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            let raw = field.stringValue.trimmingCharacters(in: .whitespaces)
+            guard let oneBased = Int(raw), oneBased >= 1, oneBased <= lineCount else {
+                NSSound.beep()
+                return
+            }
+            // 1-based input → 0-based engine line.
+            self?.tabController.goToLine(oneBased - 1)
+        }
     }
 
     // MARK: - View menu actions
@@ -376,6 +410,7 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
              #selector(openContainingFolder(_:)):
             return hasFile
         case #selector(openQuickFind(_:)),
+             #selector(goToLine(_:)),
              #selector(stopLoading(_:)):
             return hasFile
         case #selector(clearRecentFiles(_:)):

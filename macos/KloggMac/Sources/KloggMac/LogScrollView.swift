@@ -96,6 +96,27 @@ final class LogScrollView: NSScrollView {
         docView.selectAndScrollToLine(line)
     }
 
+    /// 0-based index of the currently selected/anchored line, or nil if none.
+    /// Used by QuickFind to start searching from the current position.
+    var currentLine: Int? { docView.currentSelectedLine }
+
+    /// Number of lines this view currently displays.
+    var lineCount: Int { docView.currentLineCount }
+
+    // MARK: - Search / QuickFind highlight (Wave 6)
+
+    /// Highlight the active SearchBarView pattern in this view (main-view search wash).
+    func setSearchHighlight(pattern: String?, caseInsensitive: Bool, isRegex: Bool) {
+        docView.setSearchHighlight(pattern: pattern, caseInsensitive: caseInsensitive, isRegex: isRegex)
+        docView.needsDisplay = true
+    }
+
+    /// Highlight the active QuickFind needle in this view.
+    func setQuickFindHighlight(pattern: String?, caseInsensitive: Bool, isRegex: Bool) {
+        docView.setQuickFindHighlight(pattern: pattern, caseInsensitive: caseInsensitive, isRegex: isRegex)
+        docView.needsDisplay = true
+    }
+
     /// Called after a file loads or a search completes.
     /// Pass `lineCount` explicitly so the filtered view can pass match count.
     func reloadFromEngine(lineCount: Int? = nil) {
@@ -168,6 +189,53 @@ final class LogDocumentView: NSView {
     /// Compiled highlighter rules; rebuilt when HighlighterStore changes.
     private let highlighter = LogHighlighter()
 
+    /// Transient search-match highlight: the active SearchBarView pattern (Wave 6),
+    /// painted as a distinct background layer ON TOP of the user highlighter spans so
+    /// search hits stand out in the MAIN view (klogg highlights search matches there).
+    /// nil when no search is active or the "highlight search in main" pref is off.
+    private var searchMatchRegex: NSRegularExpression?
+    /// Background colour for a search-match span (klogg uses a yellow-ish match wash).
+    private let searchMatchBack = NSColor.systemYellow.withAlphaComponent(0.45)
+
+    /// Transient QuickFind highlight: the current QuickFind needle (Wave 6), painted
+    /// like a search match but in a distinct colour so the in-place find is visible.
+    private var quickFindRegex: NSRegularExpression?
+    private let quickFindBack = NSColor.systemOrange.withAlphaComponent(0.55)
+
+    /// Set/clear the search-match highlight pattern. Honours the
+    /// `highlightSearchInMain` preference; clears the layer when the pref is off or
+    /// the pattern is empty. Mirrors klogg's search-hit colouring in the main view.
+    func setSearchHighlight(pattern: String?, caseInsensitive: Bool, isRegex: Bool) {
+        guard let pattern = pattern, !pattern.isEmpty,
+              AppPreferences.shared.highlightSearchInMain else {
+            searchMatchRegex = nil
+            return
+        }
+        searchMatchRegex = LogDocumentView.compile(pattern: pattern,
+                                                   caseInsensitive: caseInsensitive,
+                                                   isRegex: isRegex)
+    }
+
+    /// Set/clear the QuickFind highlight pattern (independent of search highlight).
+    func setQuickFindHighlight(pattern: String?, caseInsensitive: Bool, isRegex: Bool) {
+        guard let pattern = pattern, !pattern.isEmpty else {
+            quickFindRegex = nil
+            return
+        }
+        quickFindRegex = LogDocumentView.compile(pattern: pattern,
+                                                 caseInsensitive: caseInsensitive,
+                                                 isRegex: isRegex)
+    }
+
+    /// Compile a search/quickfind needle into an NSRegularExpression (literal
+    /// substrings are escaped when isRegex is false). Returns nil if it won't compile.
+    static func compile(pattern: String, caseInsensitive: Bool, isRegex: Bool) -> NSRegularExpression? {
+        let text = isRegex ? pattern : NSRegularExpression.escapedPattern(for: pattern)
+        var opts: NSRegularExpression.Options = []
+        if caseInsensitive { opts.insert(.caseInsensitive) }
+        return try? NSRegularExpression(pattern: text, options: opts)
+    }
+
     /// Resolve the log font from preferences, falling back to system monospaced.
     static func resolveFont() -> NSFont {
         let prefs = AppPreferences.shared
@@ -217,6 +285,10 @@ final class LogDocumentView: NSView {
 
     /// Fires when the user clicks a row. Set by LogScrollView.
     var onLineSelected: ((Int) -> Void)?
+
+    /// 0-based extent (caret) of the current selection; nil when nothing selected.
+    /// QuickFind reads this to start its incremental find from the current position.
+    var currentSelectedLine: Int? { selection.state.extentLine }
 
     // MARK: - Init
 
@@ -327,6 +399,22 @@ final class LogDocumentView: NSView {
                 NSRect(x: 0, y: y, width: bounds.width, height: rowHeight).fill()
             }
 
+            // Search-match + QuickFind washes: painted as translucent backgrounds
+            // BEFORE the text so the glyphs stay legible on top. Each char-range is
+            // mapped to an x-band using the monospaced char advance.
+            if searchMatchRegex != nil || quickFindRegex != nil {
+                let ns = lineText as NSString
+                let full = NSRange(location: 0, length: ns.length)
+                if let re = searchMatchRegex {
+                    paintMatchWash(re, in: lineText, full: full, colour: searchMatchBack,
+                                   textX: textX, y: y)
+                }
+                if let re = quickFindRegex {
+                    paintMatchWash(re, in: lineText, full: full, colour: quickFindBack,
+                                   textX: textX, y: y)
+                }
+            }
+
             let hl = highlighter.hasRules ? highlighter.highlight(line: lineText) : .none
 
             if hl.isEmpty {
@@ -348,6 +436,22 @@ final class LogDocumentView: NSView {
         if gutterWidth > 0 {
             drawGutter(dirtyRect: dirtyRect, firstRow: firstRow, lastRow: lastRow,
                        gutterWidth: gutterWidth)
+        }
+    }
+
+    /// Paint a translucent wash behind every match of `re` on this line. Match
+    /// char-offsets are converted to x-bands using the monospaced char advance,
+    /// matching how text is laid out (each glyph occupies exactly `charWidth`).
+    private func paintMatchWash(_ re: NSRegularExpression, in line: String,
+                                full: NSRange, colour: NSColor,
+                                textX: CGFloat, y: CGFloat) {
+        let matches = re.matches(in: line, options: [], range: full)
+        guard !matches.isEmpty, charWidth > 0 else { return }
+        colour.setFill()
+        for m in matches where m.range.length > 0 {
+            let x = textX + CGFloat(m.range.location) * charWidth
+            let w = CGFloat(m.range.length) * charWidth
+            NSRect(x: x, y: y, width: w, height: rowHeight).fill()
         }
     }
 
