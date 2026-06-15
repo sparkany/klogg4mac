@@ -40,11 +40,20 @@ final class SearchBarView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         buildSubviews()
-        // Rebuild the picker whenever the stored filters change.
-        PredefinedFilterStore.shared.onChange = { [weak self] _ in self?.reloadFilters() }
+        // Rebuild the picker whenever the stored filters change. Use the broadcast
+        // notification (not the store's single onChange closure) so EVERY open tab's
+        // picker refreshes — the closure can only have one subscriber, and with multiple
+        // tabs only the last-created SearchBarView would have won it.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(filtersChanged),
+            name: .predefinedFiltersDidChange, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    @objc private func filtersChanged() { reloadFilters() }
 
     // MARK: - Layout
 

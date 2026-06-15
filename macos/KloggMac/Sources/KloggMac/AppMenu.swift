@@ -204,20 +204,37 @@ final class AppMenu {
 
         menu.addItem(.separator())
 
-        // Find — QuickFind incremental find bar (Wave 6).
+        // Find — QuickFind incremental find bar (Wave 6). klogg: QKeySequence::Find = ⌘F.
         let find = menu.addItem(
             withTitle: "Find…",
             action: #selector(MainWindowController.openQuickFind(_:)),
             keyEquivalent: "f")
         find.target = nil   // resolved via the responder chain to MainWindowController
 
+        // Find Next / Find Previous — step the QuickFind match in the main view.
+        // klogg: LogViewQfForward = ⌘G (+'n'), LogViewQfBackward = ⌘⇧G (+Shift+N).
+        // ⌘G/⌘⇧G also match the macOS Find-panel convention.
+        let findNext = menu.addItem(
+            withTitle: "Find Next",
+            action: #selector(MainWindowController.findNext(_:)),
+            keyEquivalent: "g")
+        findNext.keyEquivalentModifierMask = [.command]
+        findNext.target = nil
+
+        let findPrev = menu.addItem(
+            withTitle: "Find Previous",
+            action: #selector(MainWindowController.findPrevious(_:)),
+            keyEquivalent: "g")
+        findPrev.keyEquivalentModifierMask = [.command, .shift]
+        findPrev.target = nil
+
         menu.addItem(.separator())
 
-        // Go to Line — modal sheet (Wave 6).
+        // Go to Line — modal sheet (Wave 6). klogg: LogViewJumpToLine = Ctrl+L → ⌘L.
         let goToLine = menu.addItem(
             withTitle: "Go to Line…",
             action: #selector(MainWindowController.goToLine(_:)),
-            keyEquivalent: "g")
+            keyEquivalent: "l")
         goToLine.keyEquivalentModifierMask = [.command]
         goToLine.target = nil
 

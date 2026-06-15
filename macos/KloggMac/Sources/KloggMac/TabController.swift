@@ -293,6 +293,41 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         }
     }
 
+    /// Step the QuickFind to the next/previous match WITHOUT requiring the bar to be
+    /// focused (driven by the Find Next / Find Previous menu items, Cmd+G / Cmd+Shift+G).
+    /// If no needle is set yet, this is a no-op (klogg beeps; the caller handles that).
+    /// Returns true if a needle was active and a step was attempted.
+    @discardableResult
+    func quickFindNext() -> Bool {
+        guard quickFind.hasNeedle else { return false }
+        quickFindStep(direction: .forward)
+        return true
+    }
+
+    @discardableResult
+    func quickFindPrevious() -> Bool {
+        guard quickFind.hasNeedle else { return false }
+        quickFindStep(direction: .backward)
+        return true
+    }
+
+    /// Whether a QuickFind needle is currently active (for menu validation).
+    var hasQuickFindNeedle: Bool { quickFind.hasNeedle }
+
+    /// Headless QuickFind driver: seed the needle, set the origin to `from`, step
+    /// next/prev (exclusive of the origin, like Return), and return the matched 0-based
+    /// line or -1 (no match / empty needle). Exercises the real QuickFindController.
+    func selfTestQuickFind(from: Int, needle: String, caseInsensitive: Bool,
+                           isRegex: Bool, next: Bool) -> Int {
+        guard quickFind.setNeedle(needle, caseInsensitive: caseInsensitive, isRegex: isRegex)
+        else { return -1 }
+        quickFindCurrentLine = from
+        let dir: QuickFindController.Direction = next ? .forward : .backward
+        guard let r = quickFind.find(direction: dir, from: from, inclusive: false) else { return -1 }
+        quickFindCurrentLine = r.line
+        return r.line
+    }
+
     private func closeQuickFind() {
         quickFindHeight?.constant = 0
         quickFindBar.isHidden = true
@@ -430,6 +465,26 @@ final class TabController: NSViewController {
     /// Jump the active tab's main view to a 0-based line (wired from Go to Line).
     func goToLine(_ line: Int) {
         currentTab?.mainView.scrollToLine(line)
+    }
+
+    /// Step the active tab's QuickFind to the next match (Find Next, Cmd+G). Returns
+    /// false when there is no active QuickFind needle so the caller can beep.
+    @discardableResult
+    func quickFindNext() -> Bool { currentTab?.quickFindNext() ?? false }
+
+    /// Step the active tab's QuickFind to the previous match (Find Previous, Cmd+Shift+G).
+    @discardableResult
+    func quickFindPrevious() -> Bool { currentTab?.quickFindPrevious() ?? false }
+
+    /// Whether the active tab has an active QuickFind needle (for menu validation).
+    var currentTabHasQuickFindNeedle: Bool { currentTab?.hasQuickFindNeedle ?? false }
+
+    /// Headless QuickFind driver on the active tab (see CrawlerTab.selfTestQuickFind).
+    func selfTestQuickFind(from: Int, needle: String, caseInsensitive: Bool,
+                           isRegex: Bool, next: Bool) -> Int {
+        currentTab?.selfTestQuickFind(from: from, needle: needle,
+                                      caseInsensitive: caseInsensitive,
+                                      isRegex: isRegex, next: next) ?? -1
     }
 
     /// Run a predefined filter in the active tab's search bar (Wave 8).

@@ -325,6 +325,24 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         tabController.showQuickFind()
     }
 
+    /// Find Next (Cmd+G): step the active tab's QuickFind forward. If no needle is set
+    /// yet, open the QuickFind bar so the user can type one (klogg opens QuickFind on
+    /// the find-next shortcut when nothing is active).
+    @objc func findNext(_ sender: Any?) {
+        guard tabController.currentFilePath != nil else { NSSound.beep(); return }
+        if !tabController.quickFindNext() {
+            tabController.showQuickFind()
+        }
+    }
+
+    /// Find Previous (Cmd+Shift+G): step the active tab's QuickFind backward.
+    @objc func findPrevious(_ sender: Any?) {
+        guard tabController.currentFilePath != nil else { NSSound.beep(); return }
+        if !tabController.quickFindPrevious() {
+            tabController.showQuickFind()
+        }
+    }
+
     @objc func goToLine(_ sender: Any?) {
         guard let window = window else { return }
         let lineCount = tabController.currentMainLineCount
@@ -563,6 +581,8 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
             return hasFile
         case #selector(openQuickFind(_:)),
              #selector(goToLine(_:)),
+             #selector(findNext(_:)),
+             #selector(findPrevious(_:)),
              #selector(stopLoading(_:)):
             return hasFile
         case #selector(openFromClipboard(_:)):
@@ -784,6 +804,74 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     /// Restore the last session; returns the number of files reopened.
     @discardableResult
     func selfTestRestoreSession() -> Int { restoreSession() }
+
+    // --- Dialog editor controllers (headless) ---
+
+    /// The Highlighters editor controller (lazily created; window never shown).
+    var selfTestHighlightersEditor: HighlightersWindowController { highlightersWC }
+    /// The Predefined-filters editor controller.
+    var selfTestPredefinedFiltersEditor: PredefinedFiltersWindowController { predefinedFiltersWC }
+
+    // --- Preferences live-apply (headless) ---
+
+    /// The active tab's main-view row height (changes when the font size changes), or 0.
+    var selfTestMainRowHeight: CGFloat { tabController.currentTab?.mainView.rowHeight ?? 0 }
+
+    /// Whether the active tab's main-view gutter is currently drawn (line numbers on).
+    var selfTestMainGutterWidth: CGFloat { tabController.currentTab?.mainView.gutterWidth ?? 0 }
+
+    /// Apply preference changes to the active tab synchronously (the live path posts
+    /// .preferencesDidChange async; the harness needs it applied before asserting).
+    func selfTestApplyPreferencesToCurrentTab() {
+        tabController.currentTab?.mainView.applyFontPreference()
+        tabController.currentTab?.mainView.applyViewPreferences()
+        tabController.currentTab?.filteredView.applyFontPreference()
+        tabController.currentTab?.filteredView.applyViewPreferences()
+    }
+
+    // --- Search / QuickFind correctness (headless) ---
+
+    /// Count matches for `pattern` by scanning the engine line-by-line with the same
+    /// compile rules the views use. Independent of the async engine search so tests can
+    /// assert deterministic counts (cross-checked against grep in the harness).
+    func selfTestCountMatches(pattern: String, caseInsensitive: Bool, isRegex: Bool) -> Int {
+        guard let engine = tabController.currentTab?.engine,
+              let regex = LogDocumentView.compile(pattern: pattern,
+                                                  caseInsensitive: caseInsensitive,
+                                                  isRegex: isRegex) else { return -1 }
+        let n = Int(engine.lineCount())
+        var count = 0
+        for i in 0..<n {
+            guard let text = engine.lineString(at: UInt(i)) else { continue }
+            let r = NSRange(location: 0, length: (text as NSString).length)
+            if regex.firstMatch(in: text, options: [], range: r) != nil { count += 1 }
+        }
+        return count
+    }
+
+    /// Drive a QuickFind step directly (next/prev) and return the resulting current line
+    /// (0-based) or -1. Seeds the needle first so the test controls the origin.
+    func selfTestQuickFindFrom(line: Int, needle: String, caseInsensitive: Bool,
+                               isRegex: Bool, next: Bool) -> Int {
+        return tabController.selfTestQuickFind(from: line, needle: needle,
+                                               caseInsensitive: caseInsensitive,
+                                               isRegex: isRegex, next: next)
+    }
+
+    /// Go-to-line clamp behaviour: scroll to `oneBased` (1-based) and return the main
+    /// view's first-visible line (0-based), or -1 if out of range / no file.
+    func selfTestGoToLineResult(oneBased: Int) -> Int {
+        // Mirror the goToLine(_:) bounds check, but read the ENGINE line count so the
+        // assertion isn't gated on the view having been laid out in a real viewport
+        // (headless mode has no scroll geometry). 1-based, inclusive.
+        let lineCount = tabController.currentLineCount
+        guard lineCount > 0, oneBased >= 1, oneBased <= lineCount else { return -1 }
+        tabController.currentTab?.mainView.reloadFromEngine()
+        tabController.goToLine(oneBased - 1)
+        // A valid jump selects the target line; report the selected line (0-based) so
+        // callers can confirm acceptance even without a live viewport.
+        return tabController.currentTab?.mainView.currentLine ?? 0
+    }
 
     /// Render the window's content view OFFSCREEN (never ordered on screen) to a PNG.
     /// Used to verify the tab strip + log rendering visually in headless QA.

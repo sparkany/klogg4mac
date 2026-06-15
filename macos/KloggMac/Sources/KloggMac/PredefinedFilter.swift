@@ -12,6 +12,14 @@
 
 import Foundation
 
+extension Notification.Name {
+    /// Posted (main thread) after the predefined-filter list changes so every open
+    /// tab's search-bar picker can rebuild. A plain `onChange` closure can only have one
+    /// subscriber, but the picker lives per-tab, so a broadcast notification is needed
+    /// to refresh all of them.
+    static let predefinedFiltersDidChange = Notification.Name("klogg.predefinedFiltersDidChange")
+}
+
 // MARK: - PredefinedFilter
 
 struct PredefinedFilter: Codable, Equatable {
@@ -49,6 +57,7 @@ final class PredefinedFilterStore {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.onChange?(self.filters)
+            NotificationCenter.default.post(name: .predefinedFiltersDidChange, object: self)
         }
     }
 
