@@ -73,12 +73,13 @@ final class AppToolbar: NSObject, NSToolbarDelegate {
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Reload"
             item.paletteLabel = "Reload File"
-            item.toolTip = "Reload the current file (TODO: Phase 3)"
+            item.toolTip = "Reload the current file (⌘R)"
             if let img = NSImage(systemSymbolName: "arrow.clockwise",
                                  accessibilityDescription: "Reload") {
                 item.image = img
             }
-            item.isEnabled = false   // TODO(Phase 3): wire reload
+            item.action = #selector(AppMenuActions.reloadFile(_:))
+            item.target = nil   // first responder chain (validated by MainWindowController)
             return item
 
         case .kloggFollow:
@@ -97,12 +98,13 @@ final class AppToolbar: NSObject, NSToolbarDelegate {
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Favorite"
             item.paletteLabel = "Add to Favorites"
-            item.toolTip = "Add current file to favorites (TODO: Phase 4)"
+            item.toolTip = "Toggle current file in favorites"
             if let img = NSImage(systemSymbolName: "star",
                                  accessibilityDescription: "Favorite") {
                 item.image = img
             }
-            item.isEnabled = false   // TODO(Phase 4): favorites
+            item.action = #selector(AppMenuActions.toggleFavorite(_:))
+            item.target = nil   // first responder chain (validated by MainWindowController)
             return item
 
         case .kloggInfo:
@@ -131,12 +133,13 @@ final class AppToolbar: NSObject, NSToolbarDelegate {
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Scratchpad"
             item.paletteLabel = "Open Scratchpad"
-            item.toolTip = "Open scratchpad (TODO: Phase 4)"
+            item.toolTip = "Open scratchpad"
             if let img = NSImage(systemSymbolName: "note.text",
                                  accessibilityDescription: "Scratchpad") {
                 item.image = img
             }
-            item.isEnabled = false   // TODO(Phase 4): scratchpad
+            item.action = #selector(AppMenuActions.showScratchpad(_:))
+            item.target = nil   // first responder chain
             return item
 
         default:
@@ -173,4 +176,7 @@ final class AppToolbar: NSObject, NSToolbarDelegate {
 @objc protocol AppMenuActions {
     @objc optional func openDocument(_ sender: Any?)
     @objc optional func stopLoading(_ sender: Any?)
+    @objc optional func reloadFile(_ sender: Any?)
+    @objc optional func toggleFavorite(_ sender: Any?)
+    @objc optional func showScratchpad(_ sender: Any?)
 }

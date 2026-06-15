@@ -39,7 +39,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property (class, nonatomic, readonly) BOOL isStub;
 
 /// Begin attaching/indexing a file. Returns immediately; progress arrives via delegate.
+/// Must be called once per engine; re-attaching the same engine throws. Use `reload`
+/// to re-index a file that is already attached.
 - (void)openFileAtPath:(NSString *)path;
+
+/// Re-index the already-attached file (picks up appended/changed content), as klogg's
+/// Reload does. Returns immediately; loadingProgress/loadingFinished arrive via delegate.
+/// No-op if no file has been attached yet.
+- (void)reload;
 
 /// Total number of lines in the source (valid after loadingFinished:YES).
 - (NSUInteger)lineCount;

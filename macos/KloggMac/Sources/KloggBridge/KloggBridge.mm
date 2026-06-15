@@ -114,6 +114,7 @@ struct KloggEngineImpl {
     std::unique_ptr<QObject>          context;        // Qt-thread-affine context object
     std::unique_ptr<LogData>          logData;
     std::unique_ptr<LogFilteredData>  filteredData;   // created after logData
+    bool                              attached = false; // a file has been attachFile'd
 };
 
 // ---------------------------------------------------------------------------
@@ -210,11 +211,25 @@ struct KloggEngineImpl {
 
 - (void)openFileAtPath:(NSString*)path {
     if (!_impl) return;
-    const QString qpath = QString::fromNSString(path);
     KloggEngineImpl* impl = _impl;
+    // attachFile is one-shot per LogData (re-attaching throws CantReattachErr); if
+    // the same path is opened again, treat it as a reload of the live file.
+    if (impl->attached) { [self reload]; return; }
+    const QString qpath = QString::fromNSString(path);
+    impl->attached = true;
     QMetaObject::invokeMethod(
         impl->context.get(),
         [impl, qpath]() { impl->logData->attachFile(qpath); },
+        Qt::QueuedConnection);
+}
+
+- (void)reload {
+    if (!_impl) return;
+    KloggEngineImpl* impl = _impl;
+    if (!impl->attached) return;   // nothing attached yet
+    QMetaObject::invokeMethod(
+        impl->context.get(),
+        [impl]() { impl->logData->reload(); },
         Qt::QueuedConnection);
 }
 

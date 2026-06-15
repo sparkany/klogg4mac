@@ -198,11 +198,74 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     }
 
     @objc func openFromClipboard(_ sender: Any?) {
-        // TODO(Phase 3): open text from clipboard as a virtual file
+        guard let text = NSPasteboard.general.string(forType: .string),
+              !text.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        guard let path = writeTempLog(text, prefix: "clipboard") else {
+            NSSound.beep()
+            return
+        }
+        openFile(path: path)
     }
 
     @objc func openFromURL(_ sender: Any?) {
-        // TODO(Phase 3): download/open from URL
+        guard let window = window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Open from URL"
+        alert.informativeText = "Enter a URL to download and open:"
+        alert.addButton(withTitle: "Open")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "https://example.com/app.log"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            let raw = field.stringValue.trimmingCharacters(in: .whitespaces)
+            guard let url = URL(string: raw), url.scheme != nil else {
+                NSSound.beep()
+                return
+            }
+            self?.downloadAndOpen(url: url)
+        }
+    }
+
+    /// Download `url` to a temp file off the main thread, then open it.
+    private func downloadAndOpen(url: URL) {
+        let task = URLSession.shared.downloadTask(with: url) { [weak self] tmpURL, _, error in
+            guard let tmpURL = tmpURL, error == nil else {
+                DispatchQueue.main.async { NSSound.beep() }
+                return
+            }
+            // Move the downloaded file to a stable temp path with the URL's name.
+            let name = url.lastPathComponent.isEmpty ? "download.log" : url.lastPathComponent
+            let dest = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("klogg-url-\(UUID().uuidString)-\(name)")
+            do {
+                try FileManager.default.moveItem(at: tmpURL, to: dest)
+            } catch {
+                DispatchQueue.main.async { NSSound.beep() }
+                return
+            }
+            DispatchQueue.main.async { self?.openFile(path: dest.path) }
+        }
+        task.resume()
+    }
+
+    /// Write `text` to a uniquely-named temp .log file; returns its path (nil on failure).
+    private func writeTempLog(_ text: String, prefix: String) -> String? {
+        let dest = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("klogg-\(prefix)-\(UUID().uuidString).log")
+        do {
+            try text.write(to: dest, atomically: true, encoding: .utf8)
+            return dest.path
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - Edit menu actions
@@ -225,7 +288,10 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     }
 
     @objc func clearLog(_ sender: Any?) {
-        // TODO(Phase 3): clear file / truncate
+        // In klogg, "Clear Log" truncates the backing file and is only offered for
+        // temporary documents (clipboard/scratch logs that klogg itself owns) — it
+        // must NOT destroy a user's real log. We don't yet tag temp-backed tabs, so
+        // this remains disabled (see validateMenuItem) rather than risk data loss.
     }
 
     @objc func openQuickFind(_ sender: Any?) {
@@ -277,13 +343,14 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     }
 
     @objc func toggleMainLineNumbers(_ sender: NSMenuItem) {
-        // TODO(Phase 3): wire to LogScrollView's gutter visibility
-        sender.state = (sender.state == .on) ? .off : .on
+        // Flip the persisted preference; the .preferencesDidChange notification
+        // (posted by the setter) drives each tab's applyViewPreferences(), which
+        // shows/hides the inline gutter. Checkmark is refreshed in validateMenuItem.
+        AppPreferences.shared.lineNumbersInMain.toggle()
     }
 
     @objc func toggleFilteredLineNumbers(_ sender: NSMenuItem) {
-        // TODO(Phase 3): wire to filtered view's gutter visibility
-        sender.state = (sender.state == .on) ? .off : .on
+        AppPreferences.shared.lineNumbersInFiltered.toggle()
     }
 
     @objc func toggleTextWrap(_ sender: Any?) {
@@ -295,7 +362,7 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     }
 
     @objc func reloadFile(_ sender: Any?) {
-        // TODO(Phase 3): re-attach file in current tab
+        tabController.reloadCurrentTab()
     }
 
     @objc func stopLoading(_ sender: Any?) {
@@ -352,11 +419,28 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     // MARK: - Favorites
 
     @objc func addToFavorites(_ sender: Any?) {
-        // TODO(Phase 4): favorite files
+        guard let path = tabController.currentFilePath else { return }
+        FavoritesStore.shared.add(path: path)
+        FavoritesMenu.shared.rebuild()
     }
 
     @objc func removeFromFavorites(_ sender: Any?) {
-        // TODO(Phase 4): favorite files
+        guard let path = tabController.currentFilePath else { return }
+        FavoritesStore.shared.remove(path: path)
+        FavoritesMenu.shared.rebuild()
+    }
+
+    /// Toolbar ★: add the current file to favorites, or remove it if already there.
+    @objc func toggleFavorite(_ sender: Any?) {
+        guard let path = tabController.currentFilePath else { return }
+        FavoritesStore.shared.toggle(path: path)
+        FavoritesMenu.shared.rebuild()
+    }
+
+    /// Open a favorite from the Favorites menu.
+    @objc func openFavorite(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        openFile(path: path)
     }
 
     // MARK: - Help menu actions
@@ -402,19 +486,53 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     // NSMenuItemValidation -- NSWindowController inherits this via NSResponder.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let hasFile = tabController.currentFilePath != nil
+        let path = tabController.currentFilePath
         switch menuItem.action {
         case #selector(closeCurrentTab(_:)),
              #selector(closeAllTabs(_:)):
             return hasFile
         case #selector(copyPathToClipboard(_:)),
-             #selector(openContainingFolder(_:)):
+             #selector(openContainingFolder(_:)),
+             #selector(openInEditor(_:)),
+             #selector(reloadFile(_:)):
             return hasFile
         case #selector(openQuickFind(_:)),
              #selector(goToLine(_:)),
              #selector(stopLoading(_:)):
             return hasFile
+        case #selector(openFromClipboard(_:)):
+            // Enabled only when the pasteboard actually holds text.
+            return NSPasteboard.general.string(forType: .string)?.isEmpty == false
+        case #selector(openFromURL(_:)):
+            return true
+        case #selector(clearLog(_:)):
+            // Only valid for temp-backed docs, which we don't yet distinguish.
+            return false
+        case #selector(addToFavorites(_:)):
+            return hasFile && !(path.map { FavoritesStore.shared.isFavorite($0) } ?? false)
+        case #selector(removeFromFavorites(_:)):
+            return path.map { FavoritesStore.shared.isFavorite($0) } ?? false
+        case #selector(toggleMainLineNumbers(_:)):
+            menuItem.state = AppPreferences.shared.lineNumbersInMain ? .on : .off
+            return true
+        case #selector(toggleFilteredLineNumbers(_:)):
+            menuItem.state = AppPreferences.shared.lineNumbersInFiltered ? .on : .off
+            return true
         case #selector(clearRecentFiles(_:)):
             return !RecentFiles.shared.paths.isEmpty
+        default:
+            return true
+        }
+    }
+
+    /// Toolbar items route through the responder chain; validate them here so the
+    /// ★ favorite and Reload buttons grey out when no file is open.
+    func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
+        switch item.action {
+        case #selector(reloadFile(_:)), #selector(toggleFavorite(_:)):
+            return tabController.currentFilePath != nil
+        case #selector(stopLoading(_:)):
+            return tabController.currentFilePath != nil
         default:
             return true
         }
@@ -427,5 +545,42 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
 
     /// The window's toolbar (for headless toolbar-state auditing).
     var selfTestToolbar: NSToolbar? { window?.toolbar }
+
+    /// Open a path then return the new tab count (headless behavior tests).
+    func selfTestOpen(_ path: String) { openFile(path: path) }
+
+    /// The active tab's file path (headless assertions).
+    var selfTestCurrentFilePath: String? { tabController.currentFilePath }
+
+    /// The active tab's engine line count (headless reload assertion).
+    var selfTestCurrentLineCount: Int { tabController.currentLineCount }
+
+    /// Close a specific tab by index (headless close-specific-tab assertion).
+    func selfTestCloseTab(at index: Int) { tabController.closeTab(at: index) }
+
+    /// The current file's favorite state (headless favorites round-trip assertion).
+    var selfTestCurrentIsFavorite: Bool {
+        tabController.currentFilePath.map { FavoritesStore.shared.isFavorite($0) } ?? false
+    }
+
+    /// Invoke a favorites/line-number action by name for headless behavior tests.
+    func selfTestToggleFavorite() { toggleFavorite(nil) }
+
+    /// Render the window's content view OFFSCREEN (never ordered on screen) to a PNG.
+    /// Used to verify the tab strip + log rendering visually in headless QA.
+    @discardableResult
+    func selfTestSnapshot(to path: String, size: NSSize = NSSize(width: 900, height: 500)) -> Bool {
+        guard let content = window?.contentView else { return false }
+        content.frame = NSRect(origin: .zero, size: size)
+        content.layoutSubtreeIfNeeded()
+        // Force the log views to fetch + lay out their visible rows.
+        tabController.updateStatusBar()
+        guard let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else {
+            return false
+        }
+        content.cacheDisplay(in: content.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return false }
+        return (try? data.write(to: URL(fileURLWithPath: path))) != nil
+    }
 }
 

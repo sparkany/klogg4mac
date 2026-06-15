@@ -143,22 +143,20 @@ final class AppMenu {
                      keyEquivalent: "o")
             .target = nil
 
-        // Open from Clipboard — TODO Phase 3
+        // Open from Clipboard — validated via validateMenuItem (needs pasteboard text).
         let clip = menu.addItem(
             withTitle: "Open from Clipboard",
             action: #selector(MainWindowController.openFromClipboard(_:)),
             keyEquivalent: "v")
         clip.keyEquivalentModifierMask = [.command]
         clip.target = nil
-        clip.isEnabled = false   // TODO(Phase 3)
 
-        // Open from URL — TODO Phase 3
+        // Open from URL — download then open.
         let url = menu.addItem(
             withTitle: "Open from URL…",
             action: #selector(MainWindowController.openFromURL(_:)),
             keyEquivalent: "")
         url.target = nil
-        url.isEnabled = false    // TODO(Phase 3)
 
         // Open Recent submenu
         let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
@@ -237,22 +235,20 @@ final class AppMenu {
 
         menu.addItem(.separator())
 
-        // Open in Editor — TODO
+        // Open in Editor — opens the file in the default editor app.
         let editor = menu.addItem(
             withTitle: "Open in Editor",
             action: #selector(MainWindowController.openInEditor(_:)),
             keyEquivalent: "")
-        editor.target = nil
-        editor.isEnabled = false   // TODO(Phase 4)
+        editor.target = nil   // validated via validateMenuItem (needs an open file)
 
-        // Clear Log — TODO Phase 3
+        // Clear Log — only valid for temp-backed docs; gated in validateMenuItem.
         let clear = menu.addItem(
             withTitle: "Clear Log",
             action: #selector(MainWindowController.clearLog(_:)),
             keyEquivalent: "x")
         clear.keyEquivalentModifierMask = [.command]
         clear.target = nil
-        clear.isEnabled = false   // TODO(Phase 3)
 
         item.submenu = menu
         return item
@@ -324,14 +320,13 @@ final class AppMenu {
 
         menu.addItem(.separator())
 
-        // Reload — TODO
+        // Reload — re-attach the current file; gated to an open file in validateMenuItem.
         let reload = menu.addItem(
             withTitle: "Reload",
             action: #selector(MainWindowController.reloadFile(_:)),
             keyEquivalent: "r")
         reload.keyEquivalentModifierMask = [.command]
         reload.target = nil
-        reload.isEnabled = false   // TODO(Phase 3)
 
         item.submenu = menu
         return item
@@ -478,23 +473,7 @@ final class AppMenu {
 
     private static func favoritesMenuItem() -> NSMenuItem {
         let item = NSMenuItem()
-        let menu = NSMenu(title: "Favorites")
-
-        let add = menu.addItem(
-            withTitle: "Add to Favorites",
-            action: #selector(MainWindowController.addToFavorites(_:)),
-            keyEquivalent: "")
-        add.target = nil
-        add.isEnabled = false   // TODO(Phase 4)
-
-        let remove = menu.addItem(
-            withTitle: "Remove from Favorites",
-            action: #selector(MainWindowController.removeFromFavorites(_:)),
-            keyEquivalent: "")
-        remove.target = nil
-        remove.isEnabled = false   // TODO(Phase 4)
-
-        item.submenu = menu
+        item.submenu = FavoritesMenu.shared.menu
         return item
     }
 
@@ -590,5 +569,55 @@ final class RecentFilesMenu: NSObject {
             action: #selector(MainWindowController.clearRecentFiles(_:)),
             keyEquivalent: "")
         clear.target = nil
+    }
+}
+
+// MARK: - FavoritesMenu
+
+/// Manages the "Favorites" menu: an Add/Remove pair (validated via the responder
+/// chain) followed by one item per favorited file. Kept in sync with
+/// FavoritesStore.shared.
+final class FavoritesMenu: NSObject {
+
+    static let shared = FavoritesMenu()
+
+    let menu = NSMenu(title: "Favorites")
+
+    private override init() {
+        super.init()
+        rebuild()
+        FavoritesStore.shared.onChange = { [weak self] _ in self?.rebuild() }
+    }
+
+    func rebuild() {
+        menu.removeAllItems()
+
+        let add = menu.addItem(
+            withTitle: "Add to Favorites",
+            action: #selector(MainWindowController.addToFavorites(_:)),
+            keyEquivalent: "")
+        add.target = nil   // validated in MainWindowController.validateMenuItem
+
+        let remove = menu.addItem(
+            withTitle: "Remove from Favorites",
+            action: #selector(MainWindowController.removeFromFavorites(_:)),
+            keyEquivalent: "")
+        remove.target = nil
+
+        let paths = FavoritesStore.shared.paths
+        if !paths.isEmpty {
+            menu.addItem(.separator())
+            for path in paths {
+                let name = (path as NSString).lastPathComponent
+                let it = NSMenuItem(
+                    title: name,
+                    action: #selector(MainWindowController.openFavorite(_:)),
+                    keyEquivalent: "")
+                it.toolTip = path
+                it.representedObject = path
+                it.target = nil
+                menu.addItem(it)
+            }
+        }
     }
 }
