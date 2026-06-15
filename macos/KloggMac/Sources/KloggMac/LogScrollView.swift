@@ -43,6 +43,13 @@ final class LogScrollView: NSScrollView {
     /// Guards the one-shot stub auto-load (shared across all instances of this class).
     private static var stubAutoLoadFired = false
 
+    /// Called when the user clicks (selects) a row. Argument is the row index
+    /// within this view's coordinate space (0-based match index for .filtered mode,
+    /// 0-based source line for .main mode).
+    var onLineSelected: ((Int) -> Void)? {
+        didSet { docView.onLineSelected = onLineSelected }
+    }
+
     init(engine: KloggEngine, mode: LogViewMode = .main) {
         docView = LogDocumentView(engine: engine, mode: mode)
         gutter  = LogLineNumberGutter(font: docView.logFont, rowHeight: docView.rowHeight)
@@ -80,6 +87,12 @@ final class LogScrollView: NSScrollView {
         LogScrollView.stubAutoLoadFired = true
         // Synthetic path: stub generates 1,000,000 lines for any non-file path.
         docView.engine.openFile(atPath: "stub://1M-lines")
+    }
+
+    /// Scroll to make `line` visible and select it.
+    func scrollToLine(_ line: Int) {
+        docView.selectAndScrollToLine(line)
+        updateGutterFrame()
     }
 
     /// Called after a file loads or a search completes.
@@ -167,6 +180,9 @@ final class LogDocumentView: NSView {
     private let selection = LogSelectionController()
     /// Set when user is dragging to extend the selection.
     private var isDragging: Bool = false
+
+    /// Fires when the user clicks a row. Set by LogScrollView.
+    var onLineSelected: ((Int) -> Void)?
 
     // MARK: - Init
 
@@ -292,6 +308,8 @@ final class LogDocumentView: NSView {
         }
         isDragging = true
         needsDisplay = true
+        // Notify owner so filtered-view clicks can jump the main view.
+        onLineSelected?(line)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -358,6 +376,14 @@ final class LogDocumentView: NSView {
     private func scrollLineToVisible(_ line: Int) {
         let y = CGFloat(line) * rowHeight
         scrollToVisible(NSRect(x: 0, y: y, width: 1, height: rowHeight))
+    }
+
+    /// Select `line` and scroll it into view (called by LogScrollView.scrollToLine).
+    func selectAndScrollToLine(_ line: Int) {
+        guard line >= 0, line < currentLineCount else { return }
+        selection.setAnchor(line: line)
+        scrollLineToVisible(line)
+        needsDisplay = true
     }
 
     // MARK: - Actions (wired to first-responder chain)
