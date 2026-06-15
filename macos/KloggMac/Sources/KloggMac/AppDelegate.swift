@@ -29,9 +29,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Open a file passed on the command line: `KloggMac <path>`.
         // Prefer the first non-flag argument that points to an existing file.
-        if let path = CommandLine.arguments.dropFirst()
-                .first(where: { !$0.hasPrefix("-") && FileManager.default.fileExists(atPath: $0) }) {
+        let cliPath = CommandLine.arguments.dropFirst()
+            .first(where: { !$0.hasPrefix("-") && FileManager.default.fileExists(atPath: $0) })
+        if let path = cliPath {
             wc.openFile(path: path)
+        } else if !selfTest && AppPreferences.shared.loadLastSession {
+            // No file on the command line: restore the previous session if enabled.
+            wc.restoreSession()
         }
 
         if selfTest {
@@ -45,6 +49,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Final snapshot of the open-files set (also kept current on every tab change).
+        windowController?.saveSession()
     }
 
     // MARK: - NSApplicationDelegate: open-file events (Finder double-click, etc.)

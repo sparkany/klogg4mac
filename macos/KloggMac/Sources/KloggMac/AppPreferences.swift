@@ -103,6 +103,28 @@ final class AppPreferences {
         set { set("session.followOnLoad", b: newValue) }
     }
 
+    // MARK: - Last session (open files + active tab)
+
+    /// Ordered list of file paths open in the previous session. Restored on launch
+    /// when loadLastSession is true and no file was given on the command line.
+    var sessionOpenFiles: [String] {
+        get { (UserDefaults.standard.array(forKey: key("session.openFiles")) as? [String]) ?? [] }
+        set { UserDefaults.standard.set(newValue, forKey: key("session.openFiles")) }
+    }
+
+    /// Index (into sessionOpenFiles) of the tab that was active. Clamped on restore.
+    var sessionActiveIndex: Int {
+        get { int("session.activeIndex", default: 0) }
+        set { UserDefaults.standard.set(newValue, forKey: key("session.activeIndex")) }
+    }
+
+    /// Persist the open files + active tab as the last session (no change notification —
+    /// this isn't a view preference). Pass an empty list to clear.
+    func saveSession(openFiles: [String], activeIndex: Int) {
+        sessionOpenFiles = openFiles
+        sessionActiveIndex = activeIndex
+    }
+
     var nativeFileWatch: Bool {
         get { bool("perf.nativeFileWatch", default: true) }
         set { set("perf.nativeFileWatch", b: newValue) }

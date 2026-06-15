@@ -86,12 +86,13 @@ final class AppToolbar: NSObject, NSToolbarDelegate {
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)
             item.label = "Follow"
             item.paletteLabel = "Follow File"
-            item.toolTip = "Monitor file for new content (TODO: Phase 3)"
+            item.toolTip = "Follow the file for new content (tail -f)"
             if let img = NSImage(systemSymbolName: "arrow.down.to.line",
                                  accessibilityDescription: "Follow") {
                 item.image = img
             }
-            item.isEnabled = false   // TODO(Phase 3): wire file watch
+            item.action = #selector(AppMenuActions.toggleFollow(_:))
+            item.target = nil   // first responder chain (validated by MainWindowController)
             return item
 
         case .kloggFavorite:
@@ -177,6 +178,7 @@ final class AppToolbar: NSObject, NSToolbarDelegate {
     @objc optional func openDocument(_ sender: Any?)
     @objc optional func stopLoading(_ sender: Any?)
     @objc optional func reloadFile(_ sender: Any?)
+    @objc optional func toggleFollow(_ sender: Any?)
     @objc optional func toggleFavorite(_ sender: Any?)
     @objc optional func showScratchpad(_ sender: Any?)
 }

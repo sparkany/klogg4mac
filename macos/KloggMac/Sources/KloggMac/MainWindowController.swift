@@ -92,6 +92,10 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
             }
             self.window?.title = title
             self.updateOpenedFilesMenu()
+            self.refreshFollowUI()
+            // Persist the open-files set whenever tabs change so the last session is
+            // always current (covers open, close, and tab switches).
+            self.saveSession()
         }
     }
 
@@ -100,6 +104,29 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     /// Open a file by path — called from menus, command-line args, drag-drop, and recent files.
     func openFile(path: String) {
         tabController.openFile(path: path)
+    }
+
+    // MARK: - Session restore
+
+    /// Write the current open-files set + active tab to the last-session store.
+    func saveSession() {
+        AppPreferences.shared.saveSession(
+            openFiles: tabController.openFilePaths,
+            activeIndex: tabController.activeTabIndex)
+    }
+
+    /// Reopen the files from the last session (active tab last so it ends up selected).
+    /// Only paths that still exist on disk are restored. Returns the number reopened.
+    @discardableResult
+    func restoreSession() -> Int {
+        let paths = AppPreferences.shared.sessionOpenFiles
+            .filter { FileManager.default.fileExists(atPath: $0) }
+        guard !paths.isEmpty else { return 0 }
+        for p in paths { tabController.openFile(path: p) }
+        // Select the previously-active tab (clamped to the restored set).
+        let idx = min(max(AppPreferences.shared.sessionActiveIndex, 0), paths.count - 1)
+        tabController.selectTab(at: idx)
+        return paths.count
     }
 
     // MARK: - NSDraggingDestination
@@ -358,7 +385,26 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     }
 
     @objc func toggleFollow(_ sender: Any?) {
-        // TODO(Phase 3): toggle file-watch / follow mode
+        guard tabController.currentFilePath != nil else { NSSound.beep(); return }
+        tabController.toggleFollowCurrentTab()
+        // Reflect the new state in the toolbar button highlight and menu checkmark.
+        refreshFollowUI()
+    }
+
+    /// Sync the Follow toolbar item's highlight + the View>Follow File menu checkmark
+    /// to the active tab's follow state.
+    func refreshFollowUI() {
+        let on = tabController.currentTabIsFollowing
+        // Toolbar: bordered items show a pressed/tinted state via `isBordered` + tint.
+        if let item = window?.toolbar?.items.first(where: { $0.itemIdentifier == .kloggFollow }) {
+            if #available(macOS 11.0, *) {
+                item.isBordered = true
+                item.image = NSImage(systemSymbolName: "arrow.down.to.line",
+                                     accessibilityDescription: "Follow")?
+                    .withSymbolConfiguration(
+                        .init(paletteColors: [on ? .controlAccentColor : .labelColor]))
+            }
+        }
     }
 
     @objc func reloadFile(_ sender: Any?) {
@@ -405,7 +451,12 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         // Update the status bar encoding field.
         tabController.statusBar?.updateEncoding(mib == -1 ? "Auto" : sender.title)
 
-        // TODO(Phase 5): re-index the current file with the chosen encoding via engine.
+        // Re-index the current file with the chosen encoding. The MIB is passed
+        // straight through to LogData::reload(QTextCodec*); -1 clears the override and
+        // auto-detects. loadingFinished refreshes the view + line count.
+        if tabController.currentFilePath != nil {
+            tabController.reloadCurrentTab(encodingMib: mib)
+        }
     }
 
     /// Recursively clear .on state from all items in a menu (including submenus).
@@ -512,6 +563,9 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
             return hasFile && !(path.map { FavoritesStore.shared.isFavorite($0) } ?? false)
         case #selector(removeFromFavorites(_:)):
             return path.map { FavoritesStore.shared.isFavorite($0) } ?? false
+        case #selector(toggleFollow(_:)):
+            menuItem.state = tabController.currentTabIsFollowing ? .on : .off
+            return hasFile
         case #selector(toggleMainLineNumbers(_:)):
             menuItem.state = AppPreferences.shared.lineNumbersInMain ? .on : .off
             return true
@@ -529,7 +583,8 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     /// ★ favorite and Reload buttons grey out when no file is open.
     func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
         switch item.action {
-        case #selector(reloadFile(_:)), #selector(toggleFavorite(_:)):
+        case #selector(reloadFile(_:)), #selector(toggleFavorite(_:)),
+             #selector(toggleFollow(_:)):
             return tabController.currentFilePath != nil
         case #selector(stopLoading(_:)):
             return tabController.currentFilePath != nil
@@ -565,6 +620,44 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
 
     /// Invoke a favorites/line-number action by name for headless behavior tests.
     func selfTestToggleFavorite() { toggleFavorite(nil) }
+
+    // --- Follow mode (headless) ---
+
+    /// Toggle follow on the active tab (drives toggleFollow:).
+    func selfTestToggleFollow() { toggleFollow(nil) }
+
+    /// Whether the active tab is following.
+    var selfTestIsFollowing: Bool { tabController.currentTabIsFollowing }
+
+    /// The active tab's main-view anchor line (0-based), or -1 if none. After a tail
+    /// scroll this equals lineCount-1, proving the view jumped to the new tail.
+    var selfTestMainAnchorLine: Int { tabController.currentTab?.mainView.currentLine ?? -1 }
+
+    /// Force a refresh of the active tab's main view from the engine + jump to the
+    /// tail if following (mirrors what loadingFinished: does, for deterministic tests
+    /// after the engine has finished re-indexing).
+    func selfTestRefreshFollowTail() {
+        guard let tab = tabController.currentTab else { return }
+        tab.mainView.reloadFromEngine()
+        if tab.isFollowing { tab.scrollMainToEnd() }
+    }
+
+    // --- Encoding (headless) ---
+
+    /// Re-index the active tab forcing a QTextCodec MIB encoding (-1 = auto).
+    func selfTestChangeEncoding(mib: Int) { tabController.reloadCurrentTab(encodingMib: mib) }
+
+    // --- Session restore (headless) ---
+
+    /// Open file paths in the active session (for the persistence round-trip).
+    var selfTestOpenFilePaths: [String] { tabController.openFilePaths }
+
+    /// Persist the current session (open files + active tab).
+    func selfTestSaveSession() { saveSession() }
+
+    /// Restore the last session; returns the number of files reopened.
+    @discardableResult
+    func selfTestRestoreSession() -> Int { restoreSession() }
 
     /// Render the window's content view OFFSCREEN (never ordered on screen) to a PNG.
     /// Used to verify the tab strip + log rendering visually in headless QA.

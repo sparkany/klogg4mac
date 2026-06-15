@@ -39,6 +39,10 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     var onLoadingFinished: ((CrawlerTab, Bool) -> Void)?
     var onLoadingProgress: ((CrawlerTab, Int) -> Void)?
 
+    /// Follow (tail -f) mode. When ON the engine watches the file for growth and we
+    /// auto-scroll the main view to the tail whenever a re-index finishes.
+    private(set) var isFollowing = false
+
     init(filePath: String) {
         self.filePath = filePath
         self.engine = KloggEngine()
@@ -261,6 +265,23 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         }
     }
 
+    // MARK: - Follow mode (tail -f)
+
+    /// Turn follow on/off. When enabling, the engine starts watching the file and we
+    /// immediately jump to the tail; subsequent growth scrolls to the tail as it loads.
+    func setFollowing(_ on: Bool) {
+        isFollowing = on
+        engine.setFollowEnabled(on)
+        if on { scrollMainToEnd() }
+    }
+
+    /// Scroll the main view to its last line (the tail).
+    func scrollMainToEnd() {
+        let n = mainView.lineCount
+        guard n > 0 else { return }
+        mainView.scrollToLine(n - 1)
+    }
+
     // MARK: - KloggEngineDelegate
 
     func kloggEngine(_ engine: Any, loadingProgress percent: Int32) {
@@ -270,6 +291,15 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     func kloggEngine(_ engine: Any, loadingFinished success: Bool) {
         mainView.reloadFromEngine()
         onLoadingFinished?(self, success)
+        // When following, every re-index (file grew) ends here — jump to the new tail.
+        if isFollowing { scrollMainToEnd() }
+    }
+
+    /// The file on disk changed while watching. The engine re-indexes automatically and
+    /// loadingFinished: follows (where we scroll). Nothing extra needed here, but keep
+    /// the hook so live growth is observable and future UI (badge) can use it.
+    func kloggEngine(_ engine: Any, fileChanged status: Int) {
+        // No-op: loadingFinished: drives the view refresh + tail scroll.
     }
 
     func kloggEngine(_ engine: Any, searchProgressed matchCount: UInt, percent: Int32) {
@@ -423,6 +453,30 @@ final class TabController: NSViewController {
         guard let tab = currentTab else { return }
         tab.engine.reload()
     }
+
+    /// Whether the active tab is following (tail -f). False if no tab is open.
+    var currentTabIsFollowing: Bool { currentTab?.isFollowing ?? false }
+
+    /// Toggle follow mode on the active tab; returns the new state (false if no tab).
+    @discardableResult
+    func toggleFollowCurrentTab() -> Bool {
+        guard let tab = currentTab else { return false }
+        tab.setFollowing(!tab.isFollowing)
+        return tab.isFollowing
+    }
+
+    /// Re-index the active tab's file forcing a QTextCodec MIB encoding (-1 = auto).
+    func reloadCurrentTab(encodingMib mib: Int) {
+        currentTab?.engine.reload(withEncodingMib: mib)
+    }
+
+    // MARK: - Session persistence
+
+    /// Ordered list of open file paths (for session save).
+    var openFilePaths: [String] { _tabs.map { $0.filePath } }
+
+    /// Index of the active tab (0 if none).
+    var activeTabIndex: Int { selectedIndex() ?? 0 }
 
     /// Close the currently-active tab.
     func closeCurrentTab() {

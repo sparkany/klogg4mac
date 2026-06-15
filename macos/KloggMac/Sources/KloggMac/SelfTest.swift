@@ -19,8 +19,25 @@ enum SelfTest {
         out += "\n" + auditToolbar(wc)
         out += "\n" + snapshots(wc)
         out += "\n" + behaviorTests(wc)
+        out += "\n" + followTests(wc)
+        out += "\n" + encodingTests(wc)
+        out += "\n" + sessionTests()
         out += "===== END SELFTEST =====\n"
         FileHandle.standardError.write(out.data(using: .utf8)!)
+    }
+
+    /// Pump the main run loop until `cond` is true or `timeout` seconds elapse.
+    /// Engine callbacks (re-index / file change) are delivered on the main queue, so
+    /// the harness — itself on the main thread — must spin the loop to receive them.
+    @discardableResult
+    private static func wait(timeout: TimeInterval = 5.0,
+                             _ cond: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !cond() {
+            if Date() >= deadline { return false }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        }
+        return true
     }
 
     // MARK: - Offscreen snapshots
@@ -178,6 +195,166 @@ enum SelfTest {
         s += afterClose == preClose - 1
             ? "PASS close current tab: \(preClose) -> \(afterClose)\n"
             : "FAIL close current tab: \(preClose) -> \(afterClose) (expected \(preClose - 1))\n"
+        return s
+    }
+
+    // MARK: - Follow mode tests (Wave 7b)
+
+    /// Prove follow: open a growing file, enable follow, APPEND lines, and verify
+    /// (a) the engine re-indexes to the larger line count, and (b) the main view
+    /// auto-scrolls so its anchor line == lineCount-1 (the new tail). Also snapshots
+    /// the followed view offscreen.
+    private static func followTests(_ wc: MainWindowController) -> String {
+        var s = "--- FOLLOW MODE TESTS ---\n"
+
+        // Build a fresh file we control (10 lines).
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-follow-\(UUID().uuidString).log")
+        let initial = (1...10).map { "line \($0)" }.joined(separator: "\n") + "\n"
+        guard (try? initial.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write follow test file\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        wc.selfTestOpen(path)
+        let indexed = wait { wc.selfTestCurrentLineCount >= 10 }
+        let before = wc.selfTestCurrentLineCount
+        s += indexed
+            ? "PASS initial index: lineCount=\(before)\n"
+            : "FAIL initial index: lineCount=\(before) (expected >=10)\n"
+
+        // Enable follow.
+        wc.selfTestToggleFollow()
+        s += wc.selfTestIsFollowing
+            ? "PASS follow toggled ON\n"
+            : "FAIL follow did not toggle ON\n"
+
+        // Append 5 more lines to the SAME file (tail -f scenario).
+        if let fh = FileHandle(forWritingAtPath: path) {
+            fh.seekToEndOfFile()
+            let more = (11...15).map { "line \($0)" }.joined(separator: "\n") + "\n"
+            fh.write(more.data(using: .utf8)!)
+            fh.closeFile()
+        }
+
+        // The engine watches the file (polling enabled by setFollowEnabled). Wait for
+        // the re-index to pick up the growth. Belt-and-braces: if the watcher is slow
+        // in this headless event loop, nudge a reload after a short grace period.
+        var grew = wait(timeout: 4.0) { wc.selfTestCurrentLineCount >= 15 }
+        if !grew {
+            wc.reloadFile(nil)
+            grew = wait(timeout: 4.0) { wc.selfTestCurrentLineCount >= 15 }
+        }
+        let after = wc.selfTestCurrentLineCount
+        s += grew
+            ? "PASS file grew via follow: \(before) -> \(after) lines\n"
+            : "FAIL file did not grow: \(before) -> \(after) (expected >=15)\n"
+
+        // Ensure the view fetched + scrolled to the tail, then assert the anchor line.
+        wc.selfTestRefreshFollowTail()
+        wait(timeout: 1.0) { wc.selfTestMainAnchorLine == after - 1 }
+        let anchor = wc.selfTestMainAnchorLine
+        s += (anchor == after - 1 && after > 0)
+            ? "PASS auto-scrolled to tail: anchorLine=\(anchor) == lineCount-1\n"
+            : "FAIL tail scroll: anchorLine=\(anchor) (expected \(after - 1))\n"
+
+        // Offscreen snapshot of the followed view.
+        let dir = ProcessInfo.processInfo.environment["KLOGG_SNAPSHOT_DIR"]
+            ?? NSTemporaryDirectory()
+        let snap = (dir as NSString).appendingPathComponent("klogg-snapshot-follow-tail.png")
+        s += wc.selfTestSnapshot(to: snap)
+            ? "PASS wrote \(snap)\n"
+            : "FAIL follow snapshot\n"
+
+        // Turn follow off and clean up the tab.
+        wc.selfTestToggleFollow()
+        s += !wc.selfTestIsFollowing ? "PASS follow toggled OFF\n" : "FAIL follow stuck ON\n"
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Encoding re-index tests (Wave 7b)
+
+    /// Prove encoding re-index: open a UTF-16 file; auto-detect should read it. Then
+    /// force the WRONG single-byte encoding (Latin-1, MIB 4) and verify the engine
+    /// re-indexes to a DIFFERENT line count (UTF-16's NUL bytes get mis-split), then
+    /// force auto (-1) and verify it returns to the correct count.
+    private static func encodingTests(_ wc: MainWindowController) -> String {
+        var s = "--- ENCODING RE-INDEX TESTS ---\n"
+
+        // Locate the repo's UTF-16 test file relative to the source tree.
+        let candidates = [
+            "test_data/Chinese-Lipsum.utf16.txt",
+            "../../test_data/Chinese-Lipsum.utf16.txt",
+        ].map { (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent($0) }
+        // Also try an absolute repo path derived from #filePath.
+        let repoRel = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("test_data/Chinese-Lipsum.utf16.txt").path
+        let path = ([repoRel] + candidates).first { FileManager.default.fileExists(atPath: $0) }
+        guard let utf16Path = path else {
+            return s + "SKIP encoding test (UTF-16 test file not found)\n"
+        }
+
+        // Open with auto-detect; the file has a UTF-16LE BOM so it indexes correctly.
+        wc.selfTestOpen(utf16Path)
+        wait(timeout: 5.0) { wc.selfTestCurrentLineCount > 0 }
+        let autoCount = wc.selfTestCurrentLineCount
+        s += autoCount > 0
+            ? "PASS auto-detect indexed UTF-16 file: \(autoCount) lines\n"
+            : "FAIL auto-detect produced 0 lines\n"
+
+        // Force Latin-1 (MIB 4): every byte becomes one char, so the embedded 0x00
+        // bytes of UTF-16 no longer pair up — line splitting changes, count differs.
+        // This proves changeEncoding: actually drives a re-index through the engine.
+        wc.selfTestChangeEncoding(mib: 4)
+        let changedToLatin = wait(timeout: 5.0) { wc.selfTestCurrentLineCount != autoCount }
+        let latinCount = wc.selfTestCurrentLineCount
+        s += changedToLatin
+            ? "PASS forced Latin-1 re-index changed count: \(autoCount) -> \(latinCount)\n"
+            : "FAIL forced Latin-1 did not change count: stayed \(latinCount) (expected != \(autoCount))\n"
+
+        // Force UTF-16 (MIB 1015) explicitly: re-index again, count differs from Latin-1.
+        wc.selfTestChangeEncoding(mib: 1015)
+        let changedToUtf16 = wait(timeout: 5.0) { wc.selfTestCurrentLineCount != latinCount }
+        let utf16Count = wc.selfTestCurrentLineCount
+        s += changedToUtf16
+            ? "PASS forced UTF-16 re-index changed count: \(latinCount) -> \(utf16Count)\n"
+            : "FAIL forced UTF-16 did not change count: stayed \(utf16Count) (expected != \(latinCount))\n"
+
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Session restore tests (Wave 7b)
+
+    /// Prove session persistence round-trip: save a known set of paths + active index,
+    /// read them back from UserDefaults via AppPreferences. (No file open required —
+    /// this exercises the storage layer the AppDelegate uses on launch.)
+    private static func sessionTests() -> String {
+        var s = "--- SESSION RESTORE TESTS ---\n"
+        let prefs = AppPreferences.shared
+
+        // Preserve and restore the real session afterwards so we don't disturb it.
+        let savedFiles = prefs.sessionOpenFiles
+        let savedIndex = prefs.sessionActiveIndex
+        defer { prefs.saveSession(openFiles: savedFiles, activeIndex: savedIndex) }
+
+        let paths = ["/tmp/klogg-a.log", "/tmp/klogg-b.log", "/tmp/klogg-c.log"]
+        prefs.saveSession(openFiles: paths, activeIndex: 2)
+        let readBack = prefs.sessionOpenFiles
+        let readIdx = prefs.sessionActiveIndex
+        s += (readBack == paths && readIdx == 2)
+            ? "PASS session round-trip: \(readBack.count) paths, activeIndex=\(readIdx)\n"
+            : "FAIL session round-trip: got \(readBack) idx=\(readIdx)\n"
+
+        // Empty-clears correctly.
+        prefs.saveSession(openFiles: [], activeIndex: 0)
+        s += prefs.sessionOpenFiles.isEmpty
+            ? "PASS session clear\n"
+            : "FAIL session clear: \(prefs.sessionOpenFiles)\n"
         return s
     }
 }

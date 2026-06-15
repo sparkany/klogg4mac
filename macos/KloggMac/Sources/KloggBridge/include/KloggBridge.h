@@ -28,7 +28,19 @@ NS_ASSUME_NONNULL_BEGIN
 /// Delivered periodically during search; `matchCount` hits so far, `percent` 0-100.
 /// Always on the main thread. Optional — implement for a live-updating count display.
 - (void)kloggEngine:(id)engine searchProgressed:(NSUInteger)matchCount percent:(int)percent;
+/// Delivered on the main thread when the attached file changes on disk (grew or was
+/// truncated) while following / file-watching. `status` is a KloggFileChange value.
+/// The engine re-indexes automatically; loadingFinished: follows once the re-index
+/// completes. Implement (with Follow mode) to auto-scroll to the new tail.
+- (void)kloggEngine:(id)engine fileChanged:(NSInteger)status;
 @end
+
+/// Mirrors the engine's MonitoredFileStatus for the fileChanged: callback.
+typedef NS_ENUM(NSInteger, KloggFileChange) {
+    KloggFileChangeUnchanged = 0,
+    KloggFileChangeDataAdded = 1,
+    KloggFileChangeTruncated = 2,
+};
 
 /// Thin owner of one open log file. One instance per tab/document.
 @interface KloggEngine : NSObject
@@ -47,6 +59,17 @@ NS_ASSUME_NONNULL_BEGIN
 /// Reload does. Returns immediately; loadingProgress/loadingFinished arrive via delegate.
 /// No-op if no file has been attached yet.
 - (void)reload;
+
+/// Re-index the already-attached file forcing a specific text encoding, identified
+/// by its QTextCodec MIB number (e.g. UTF-8 = 106, UTF-16 = 1015, UTF-16LE = 1014).
+/// Pass -1 to clear the forced encoding and auto-detect. Returns immediately;
+/// loadingProgress/loadingFinished arrive via delegate. No-op if nothing attached.
+- (void)reloadWithEncodingMib:(NSInteger)mib;
+
+/// Enable/disable live following of the attached file. When ON the engine watches
+/// the file for growth (polling + native watch) and emits fileChanged:/loadingFinished:
+/// as new content appears. Safe to call before/after attach; idempotent.
+- (void)setFollowEnabled:(BOOL)enabled;
 
 /// Total number of lines in the source (valid after loadingFinished:YES).
 - (NSUInteger)lineCount;

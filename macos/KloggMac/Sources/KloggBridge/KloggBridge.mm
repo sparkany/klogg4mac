@@ -32,6 +32,7 @@
 #include <QThread>
 #include <QObject>
 #include <QString>
+#include <QTextCodec>
 
 // klogg engine
 #include "logdata.h"
@@ -42,6 +43,7 @@
 #include "configuration.h"
 #include "persistentinfo.h"
 #include "regularexpressionpattern.h"
+#include "filewatcher.h"
 
 // PersistentInfo::ForcePortable must be defined exactly once in the app binary.
 // In klogg's main.cpp it is set based on the build type; for KloggMac we
@@ -194,6 +196,22 @@ struct KloggEngineImpl {
             });
         },
         Qt::QueuedConnection);
+
+    // File-on-disk changes (follow / file-watch). The engine has already enqueued a
+    // re-index by the time this fires; loadingFinished follows. We forward the status
+    // so the UI can auto-scroll to the new tail when following.
+    QObject::connect(
+        _impl->logData.get(), &LogData::fileChanged,
+        _impl->context.get(),
+        [weakSelf](MonitoredFileStatus status) {
+            NSInteger code = static_cast<NSInteger>(status);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                KloggEngine* e = weakSelf; if (!e) return;
+                if ([e.delegate respondsToSelector:@selector(kloggEngine:fileChanged:)])
+                    [e.delegate kloggEngine:e fileChanged:code];
+            });
+        },
+        Qt::QueuedConnection);
 }
 
 - (void)dealloc {
@@ -231,6 +249,40 @@ struct KloggEngineImpl {
         impl->context.get(),
         [impl]() { impl->logData->reload(); },
         Qt::QueuedConnection);
+}
+
+- (void)reloadWithEncodingMib:(NSInteger)mib {
+    if (!_impl) return;
+    KloggEngineImpl* impl = _impl;
+    if (!impl->attached) return;   // nothing attached yet
+    const int mibValue = static_cast<int>(mib);
+    QMetaObject::invokeMethod(
+        impl->context.get(),
+        [impl, mibValue]() {
+            // mib < 0 → auto-detect (forcedEncoding == nullptr). Otherwise look up the
+            // codec by MIB; if it is unknown, fall back to auto-detect rather than crash.
+            QTextCodec* codec = (mibValue >= 0) ? QTextCodec::codecForMib(mibValue) : nullptr;
+            impl->logData->reload(codec);
+        },
+        Qt::QueuedConnection);
+}
+
+- (void)setFollowEnabled:(BOOL)enabled {
+    // The engine already adds the attached file to the global FileWatcher when its
+    // indexing finishes, and re-indexes on change. To make growth detection reliable
+    // (independent of native FS-event delivery, which is flaky under a non-GUI Qt
+    // event loop / sandbox), turn on polling at a short interval while following.
+    runSyncOnQtThread(^{
+        Configuration& config = Configuration::get();
+        if (enabled) {
+            config.setPollingEnabled(true);
+            if (config.pollIntervalMs() > 500)
+                config.setPollIntervalMs(500);
+        }
+        // Native watch stays at its configured default; we only drive polling here so
+        // we never disable a watch another tab may rely on.
+        FileWatcher::getFileWatcher().updateConfiguration();
+    });
 }
 
 // MARK: - Line access (thread-safe reads via AbstractLogData)

@@ -309,14 +309,13 @@ final class AppMenu {
 
         menu.addItem(.separator())
 
-        // Follow File — TODO Phase 3
+        // Follow File — tail -f; checkmark reflects per-tab state (validateMenuItem).
         let follow = menu.addItem(
             withTitle: "Follow File",
             action: #selector(MainWindowController.toggleFollow(_:)),
             keyEquivalent: "f")
         follow.keyEquivalentModifierMask = []   // bare 'f' (klogg default)
         follow.target = nil
-        follow.isEnabled = false   // TODO(Phase 3)
 
         menu.addItem(.separator())
 
