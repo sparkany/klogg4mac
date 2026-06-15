@@ -105,6 +105,32 @@ final class LogScrollView: NSScrollView {
         docView.needsDisplay = true
     }
 
+    // MARK: - Live preference / highlighter updates
+
+    /// Re-resolve the log font from preferences; if it changed, sync the gutter,
+    /// resize rows, and repaint. Safe to call when nothing changed (no-op redraw).
+    func applyFontPreference() {
+        if docView.reloadFontFromPreferences() {
+            gutter.updateFont(docView.logFont, rowHeight: docView.rowHeight)
+            gutter.updateWidth(for: docView.currentLineCount)
+            docView.refreshSizing(lineCount: docView.currentLineCount)
+        }
+        docView.needsDisplay = true
+    }
+
+    /// Rebuild compiled highlighter rules and repaint.
+    func applyHighlighters() {
+        docView.reloadHighlighters()
+        docView.needsDisplay = true
+    }
+
+    /// Repaint to pick up view-preference changes (line-number visibility,
+    /// hideAnsiColors) that don't change row metrics.
+    func applyViewPreferences() {
+        gutter.updateWidth(for: docView.currentLineCount)
+        docView.needsDisplay = true
+    }
+
     // MARK: - Scroll tracking
 
     /// On any scroll (including horizontal), repaint so the inline gutter — which is
@@ -129,11 +155,48 @@ final class LogDocumentView: NSView {
 
     // MARK: Font / metrics
 
-    let logFont: NSFont = .monospacedSystemFont(ofSize: 12, weight: .regular)
+    /// Resolved from AppPreferences (fontFamily/fontSize); falls back to the
+    /// system monospaced font. Recomputed when the font preference changes.
+    private(set) var logFont: NSFont = LogDocumentView.resolveFont()
     /// Exact pixel height of one row, derived from font metrics.
-    let rowHeight: CGFloat
+    private(set) var rowHeight: CGFloat = 0
     /// Advance width of a single character (monospaced — all chars are the same).
-    private let charWidth: CGFloat
+    private var charWidth: CGFloat = 0
+
+    // MARK: Highlighting / preferences
+
+    /// Compiled highlighter rules; rebuilt when HighlighterStore changes.
+    private let highlighter = LogHighlighter()
+
+    /// Resolve the log font from preferences, falling back to system monospaced.
+    static func resolveFont() -> NSFont {
+        let prefs = AppPreferences.shared
+        let size = CGFloat(prefs.fontSize)
+        let family = prefs.fontFamily
+        if !family.isEmpty,
+           let f = NSFont(name: family, size: size) {
+            return f
+        }
+        return .monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    /// Recompute row height + char advance from the current logFont.
+    private func recomputeMetrics() {
+        let ascender  = logFont.ascender
+        let descender = abs(logFont.descender)
+        let leading   = logFont.leading
+        rowHeight = ceil(ascender + descender + leading) + 2
+        charWidth = logFont.advancement(forGlyph: logFont.glyph(withName: "M")).width
+    }
+
+    /// Whether the line-number gutter should be shown for this view's mode,
+    /// per AppPreferences. When false the gutter width collapses to 0.
+    private var lineNumbersEnabled: Bool {
+        switch mode {
+        case .main:     return AppPreferences.shared.lineNumbersInMain
+        case .filtered: return AppPreferences.shared.lineNumbersInFiltered
+        }
+    }
 
     // MARK: Layout constants (matching klogg's abstractlogview feel)
 
@@ -160,14 +223,25 @@ final class LogDocumentView: NSView {
     init(engine: KloggEngine, mode: LogViewMode = .main) {
         self.engine = engine
         self.mode   = mode
-        // Use typographic line height: ascender + |descender| + leading, rounded up + 2px.
-        let ascender  = logFont.ascender
-        let descender = abs(logFont.descender)
-        let leading   = logFont.leading
-        rowHeight = ceil(ascender + descender + leading) + 2
-        // For a monospaced font, character advance is uniform across all glyphs.
-        charWidth = logFont.advancement(forGlyph: logFont.glyph(withName: "M")).width
         super.init(frame: .zero)
+        // Use typographic line height: ascender + |descender| + leading, rounded up + 2px.
+        recomputeMetrics()
+    }
+
+    /// Re-resolve the font from preferences and recompute metrics. Returns true
+    /// when the font (and hence row height) changed so the owner can relayout.
+    @discardableResult
+    func reloadFontFromPreferences() -> Bool {
+        let newFont = LogDocumentView.resolveFont()
+        guard newFont != logFont else { return false }
+        logFont = newFont
+        recomputeMetrics()
+        return true
+    }
+
+    /// Rebuild the compiled highlighter rules (HighlighterStore changed).
+    func reloadHighlighters() {
+        highlighter.rebuild()
     }
 
     /// Returns the current line count for this view's mode.
@@ -224,10 +298,14 @@ final class LogDocumentView: NSView {
             fetched = engine.filteredLines(in: range, expandTabs: true)
         }
 
-        let gutterWidth = gutterView?.gutterWidth ?? 0
+        // Gutter visibility is preference-driven: when line numbers are off for
+        // this mode, the gutter collapses to width 0 and text starts at the left.
+        let gutterWidth = lineNumbersEnabled ? (gutterView?.gutterWidth ?? 0) : 0
         let textX       = gutterWidth + textLeftPadding
 
-        // Text attributes.
+        let hideAnsi = AppPreferences.shared.hideAnsiColors
+
+        // Base text attributes (used for non-highlighted lines + as the highlight base).
         let normalAttrs: [NSAttributedString.Key: Any] = [
             .font: logFont,
             .foregroundColor: NSColor.textColor,
@@ -237,19 +315,28 @@ final class LogDocumentView: NSView {
             .foregroundColor: NSColor.selectedTextColor,
         ]
 
-        // 1) Row backgrounds (selection) + text.
-        for (offset, lineText) in fetched.enumerated() {
+        // 1) Row backgrounds (selection) + text (with highlighter colouring).
+        for (offset, rawText) in fetched.enumerated() {
             let row = firstRow + offset
             let y   = CGFloat(row) * rowHeight
+            let lineText = hideAnsi ? LogDocumentView.stripAnsi(rawText) : rawText
+            let isSelected = selection.state.contains(line: row)
 
-            if selection.state.contains(line: row) {
+            if isSelected {
                 NSColor.selectedTextBackgroundColor.setFill()
                 NSRect(x: 0, y: y, width: bounds.width, height: rowHeight).fill()
+            }
+
+            let hl = highlighter.hasRules ? highlighter.highlight(line: lineText) : .none
+
+            if hl.isEmpty {
+                // Fast path: plain line, no highlighter spans.
                 (lineText as NSString).draw(at: NSPoint(x: textX, y: y),
-                                            withAttributes: selectedAttrs)
+                                            withAttributes: isSelected ? selectedAttrs : normalAttrs)
             } else {
-                (lineText as NSString).draw(at: NSPoint(x: textX, y: y),
-                                            withAttributes: normalAttrs)
+                drawHighlightedLine(lineText, highlight: hl, at: NSPoint(x: textX, y: y),
+                                    baseAttrs: isSelected ? selectedAttrs : normalAttrs,
+                                    isSelected: isSelected)
             }
 
             // Cache for fast copy access.
@@ -262,6 +349,36 @@ final class LogDocumentView: NSView {
             drawGutter(dirtyRect: dirtyRect, firstRow: firstRow, lastRow: lastRow,
                        gutterWidth: gutterWidth)
         }
+    }
+
+    /// Draw one line with per-range highlighter colours via an NSAttributedString.
+    /// Selection (when present) keeps a visible background by layering the
+    /// selectedTextBackgroundColor under the highlight back-colours.
+    private func drawHighlightedLine(_ text: String, highlight: LineHighlight,
+                                     at point: NSPoint,
+                                     baseAttrs: [NSAttributedString.Key: Any],
+                                     isSelected: Bool) {
+        let attr = NSMutableAttributedString(string: text, attributes: baseAttrs)
+        let full = NSRange(location: 0, length: (text as NSString).length)
+        for span in highlight.spans {
+            // Clamp the span to the line in case the engine expanded tabs and
+            // shifted offsets (defensive — ranges come from this same string).
+            let r = NSIntersectionRange(span.range, full)
+            guard r.length > 0 else { continue }
+            attr.addAttribute(.foregroundColor, value: span.fore, range: r)
+            attr.addAttribute(.backgroundColor, value: span.back, range: r)
+        }
+        attr.draw(at: point)
+    }
+
+    /// Strip ANSI/VT100 escape sequences (CSI ... final-byte) so coloured logs
+    /// render as plain text when AppPreferences.hideAnsiColors is on.
+    static func stripAnsi(_ s: String) -> String {
+        guard s.contains("\u{1B}") else { return s }
+        return s.replacingOccurrences(
+            of: "\u{1B}\\[[0-9;?]*[ -/]*[@-~]",
+            with: "",
+            options: .regularExpression)
     }
 
     /// Paint the line-number gutter band at the left edge of the visible viewport.

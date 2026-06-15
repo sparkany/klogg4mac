@@ -9,6 +9,12 @@
 
 import Foundation
 
+extension Notification.Name {
+    /// Posted (main thread) after the highlighter rule list changes, so open log
+    /// views can rebuild their compiled rules and repaint.
+    static let highlightersDidChange = Notification.Name("klogg.highlightersDidChange")
+}
+
 final class HighlighterStore {
 
     static let shared = HighlighterStore()
@@ -36,6 +42,7 @@ final class HighlighterStore {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.onChange?(self.rules)
+            NotificationCenter.default.post(name: .highlightersDidChange, object: self)
         }
     }
 

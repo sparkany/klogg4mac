@@ -40,9 +40,32 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         self.filteredView = LogScrollView(engine: engine, mode: .filtered)
         super.init(nibName: nil, bundle: nil)
         engine.delegate = self
+
+        // Live updates: when highlighter rules or preferences change, both log
+        // views must rebuild compiled rules / re-resolve font / repaint.
+        let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(highlightersChanged),
+                       name: .highlightersDidChange, object: nil)
+        nc.addObserver(self, selector: #selector(preferencesChanged),
+                       name: .preferencesDidChange, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    @objc private func highlightersChanged() {
+        mainView.applyHighlighters()
+        filteredView.applyHighlighters()
+    }
+
+    @objc private func preferencesChanged() {
+        // Font change (relayout) + view prefs (line numbers / ANSI) + repaint.
+        mainView.applyFontPreference()
+        filteredView.applyFontPreference()
+        mainView.applyViewPreferences()
+        filteredView.applyViewPreferences()
+    }
 
     override func loadView() {
         // Outer stack: search bar on top, then the log split below.

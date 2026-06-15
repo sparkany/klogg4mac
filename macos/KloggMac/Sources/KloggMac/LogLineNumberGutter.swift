@@ -21,9 +21,10 @@ final class LogLineNumberGutter: NSView {
     // Exposed so LogScrollView can resize the gutter when lineCount changes.
     private(set) var gutterWidth: CGFloat = 0
 
-    // Styling — same font as LogDocumentView.
-    private let font: NSFont
-    private let rowHeight: CGFloat
+    // Styling — same font as LogDocumentView. Mutable so the gutter can follow
+    // a live font-preference change (LogScrollView.applyFont).
+    private var font: NSFont
+    private var rowHeight: CGFloat
     private let separatorColor: NSColor = .separatorColor
     private let numberColor: NSColor = .secondaryLabelColor
     private let backgroundColor: NSColor = NSColor(named: NSColor.Name("gutterBackground"))
@@ -50,6 +51,13 @@ final class LogLineNumberGutter: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
 
     // MARK: - Public API
+
+    /// Update font + row height after a font-preference change so the gutter's
+    /// width recomputation and number layout stay in sync with the document view.
+    func updateFont(_ newFont: NSFont, rowHeight newRowHeight: CGFloat) {
+        font = newFont
+        rowHeight = newRowHeight
+    }
 
     /// Recompute the gutter width from the current digit count.  Call whenever
     /// lineCount changes.  Returns true when the width changed (caller must re-layout).

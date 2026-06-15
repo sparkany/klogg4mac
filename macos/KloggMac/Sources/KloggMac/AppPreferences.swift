@@ -10,6 +10,12 @@
 
 import Foundation
 
+extension Notification.Name {
+    /// Posted (main thread) after any preference value changes, so open log views
+    /// can re-apply font / line-number / ANSI settings and repaint.
+    static let preferencesDidChange = Notification.Name("klogg.preferencesDidChange")
+}
+
 final class AppPreferences {
 
     static let shared = AppPreferences()
@@ -174,6 +180,9 @@ final class AppPreferences {
     private func set(_ k: String, s: String) { UserDefaults.standard.set(s, forKey: key(k)); notify() }
 
     private func notify() {
-        DispatchQueue.main.async { [weak self] in self?.onChange?() }
+        DispatchQueue.main.async { [weak self] in
+            self?.onChange?()
+            NotificationCenter.default.post(name: .preferencesDidChange, object: self)
+        }
     }
 }
