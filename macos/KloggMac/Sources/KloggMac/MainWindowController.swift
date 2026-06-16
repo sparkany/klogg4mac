@@ -762,6 +762,24 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         Int(tabController.currentTab?.engine.searchMatchCount() ?? 0)
     }
 
+    // --- Filtered-view visibility modes (klogg visibilityBox_) ---
+
+    /// Set the active tab's filtered-view visibility (Matches/Marks/Marks-and-matches).
+    func selfTestSetFilteredVisibility(_ mode: FilteredVisibility) {
+        tabController.setFilteredVisibility(mode)
+    }
+
+    /// Rows the active tab's filtered (lower) pane currently shows.
+    var selfTestFilteredRowCount: Int { tabController.currentFilteredRowCount }
+
+    /// The active tab's "N matches found." label text.
+    var selfTestMatchLabelText: String { tabController.currentMatchLabelText }
+
+    /// Render the active tab's match-count label for `count` (deterministic headless).
+    func selfTestMatchLabel(forCount count: Int) -> String {
+        tabController.matchLabel(forCount: count)
+    }
+
     // --- Color labels (headless) ---
 
     /// Select main-view line `line` (0-based), assign it to colour `slot`, and return

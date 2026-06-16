@@ -99,7 +99,12 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
 
     @objc private func marksChanged() {
         mainView.refresh()
-        filteredView.refresh()
+        // When the lower pane includes marks, its content set changed — recompute it.
+        if searchBar.visibility != .matches {
+            recomputeFilteredVisibility()
+        } else {
+            filteredView.refresh()
+        }
     }
 
     /// Build the context-menu action set both views share (search + scratchpad).
@@ -172,51 +177,72 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     }
 
     override func loadView() {
-        // Outer stack: search bar on top, then the log split below.
+        // klogg's CrawlerWidget splitter: the main log view on top, and a "bottom
+        // window" below that stacks the search/filter line ON TOP of the filtered
+        // view (crawlerwidget.cpp: addWidget(logMainView_); addWidget(bottomWindow)
+        // where bottomWindow = [searchLineLayout, tabbedFilteredView_]). So the search
+        // bar is the divider area between the two panes, not above the whole split.
         let split = NSSplitView(frame: .zero)
-        split.isVertical = false      // stacked: main above, filtered below
+        split.isVertical = false      // stacked: main above, bottom window below
         split.dividerStyle = .thin
-        split.addArrangedSubview(mainView)
-        split.addArrangedSubview(filteredView)
 
+        // Bottom window: search/filter bar on top of the filtered view.
+        let bottomPane = NSView(frame: .zero)
         searchBar.translatesAutoresizingMaskIntoConstraints = false
-        split.translatesAutoresizingMaskIntoConstraints = false
         quickFindBar.translatesAutoresizingMaskIntoConstraints = false
+        filteredView.translatesAutoresizingMaskIntoConstraints = false
+        bottomPane.addSubview(searchBar)
+        bottomPane.addSubview(filteredView)
+
+        // QuickFind bar floats over the MAIN view (Cmd+F), so host it in the main
+        // pane's container. We wrap the main view so the QuickFind bar can slide in
+        // above it without disturbing the split.
+        let topPane = NSView(frame: .zero)
+        mainView.translatesAutoresizingMaskIntoConstraints = false
+        topPane.addSubview(quickFindBar)
+        topPane.addSubview(mainView)
+
+        split.addArrangedSubview(topPane)
+        split.addArrangedSubview(bottomPane)
+        split.translatesAutoresizingMaskIntoConstraints = false
 
         let container = NSView(frame: .zero)
-        container.addSubview(searchBar)
-        container.addSubview(quickFindBar)
         container.addSubview(split)
         container.addSubview(overview)
 
-        // QuickFind bar sits between the search bar and the split; it is collapsed
-        // to zero height (hidden) until Cmd+F. Its own intrinsic 30pt height anchor
-        // is suppressed when collapsed via the height constraint below.
+        // QuickFind bar is collapsed to zero height (hidden) until Cmd+F.
         let qfHeight = quickFindBar.heightAnchor.constraint(equalToConstant: 0)
         quickFindHeight = qfHeight
         quickFindBar.isHidden = true
 
         // Overview strip: pinned to the trailing edge, spanning the split's height.
-        // Its width toggles between 0 (hidden) and stripWidth; the split's trailing
-        // edge follows the overview's leading edge, so the log view shrinks to make
-        // room without overlapping. The strip is a sibling of the split — NEVER inside
-        // the scroll view's clip view (which would suppress text rendering).
         let ovWidth = overview.widthAnchor.constraint(
             equalToConstant: isOverviewVisible ? OverviewView.stripWidth : 0)
         overviewWidth = ovWidth
         overview.isHidden = !isOverviewVisible
 
         NSLayoutConstraint.activate([
-            searchBar.topAnchor.constraint(equalTo: container.topAnchor),
-            searchBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            searchBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-
-            quickFindBar.topAnchor.constraint(equalTo: searchBar.bottomAnchor),
-            quickFindBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            quickFindBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            // Top pane: QuickFind bar (collapsible) above the main view.
+            quickFindBar.topAnchor.constraint(equalTo: topPane.topAnchor),
+            quickFindBar.leadingAnchor.constraint(equalTo: topPane.leadingAnchor),
+            quickFindBar.trailingAnchor.constraint(equalTo: topPane.trailingAnchor),
             qfHeight,
+            mainView.topAnchor.constraint(equalTo: quickFindBar.bottomAnchor),
+            mainView.leadingAnchor.constraint(equalTo: topPane.leadingAnchor),
+            mainView.trailingAnchor.constraint(equalTo: topPane.trailingAnchor),
+            mainView.bottomAnchor.constraint(equalTo: topPane.bottomAnchor),
 
-            split.topAnchor.constraint(equalTo: quickFindBar.bottomAnchor),
+            // Bottom pane: search/filter bar above the filtered view.
+            searchBar.topAnchor.constraint(equalTo: bottomPane.topAnchor),
+            searchBar.leadingAnchor.constraint(equalTo: bottomPane.leadingAnchor),
+            searchBar.trailingAnchor.constraint(equalTo: bottomPane.trailingAnchor),
+            filteredView.topAnchor.constraint(equalTo: searchBar.bottomAnchor),
+            filteredView.leadingAnchor.constraint(equalTo: bottomPane.leadingAnchor),
+            filteredView.trailingAnchor.constraint(equalTo: bottomPane.trailingAnchor),
+            filteredView.bottomAnchor.constraint(equalTo: bottomPane.bottomAnchor),
+
+            // Split fills the container, leaving room for the overview strip.
+            split.topAnchor.constraint(equalTo: container.topAnchor),
             split.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             split.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             split.trailingAnchor.constraint(equalTo: overview.leadingAnchor),
@@ -250,17 +276,23 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         searchBar.onCancel = { [weak self] in
             self?.engine.cancel()
         }
+        // Filtered-view visibility mode (klogg visibilityBox_): recompute what the
+        // lower pane shows (Matches / Marks / Marks and matches).
+        searchBar.onVisibilityChanged = { [weak self] _ in
+            self?.recomputeFilteredVisibility()
+        }
 
         // Scrolling the main view repositions the overview's viewport indicator.
         mainView.onScroll = { [weak self] in self?.refreshOverviewViewport() }
 
         // Clicking a filtered-view row jumps the main view to the matching source line.
-        filteredView.onLineSelected = { [weak self] matchIndex in
+        // sourceLine(forRow:) honours the current visibility mode (match index OR the
+        // explicit source-line list for Marks / Marks-and-matches).
+        filteredView.onLineSelected = { [weak self] row in
             guard let self = self else { return }
-            let sourceLine = self.engine.searchMatchLine(at: UInt(matchIndex))
-            // NSNotFound bridges to UInt.max on 64-bit; skip invalid results.
-            guard sourceLine != UInt.max else { return }
-            self.mainView.scrollToLine(Int(sourceLine))
+            let sourceLine = self.filteredView.sourceLine(forRow: row)
+            guard sourceLine >= 0 else { return }
+            self.mainView.scrollToLine(sourceLine)
         }
 
         // Wire the klogg-style log-view context menu (search/scratchpad) on both views.
@@ -334,6 +366,41 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     /// (toggling highlightSearchInMain) can re-apply or clear the main-view wash.
     private var lastSearch: (pattern: String, caseInsensitive: Bool, isRegex: Bool)?
 
+    // MARK: - Filtered-view visibility (klogg visibilityBox_)
+
+    /// Recompute the lower pane's content for the current visibility mode and reload it.
+    ///
+    /// klogg's filtered view shows the union/subset of MATCH lines and MARK lines per
+    /// LogFilteredData::VisibilityFlags. Matches come from the engine (by match index);
+    /// marks live in our Swift MarksStore (by source line). For:
+    ///   • Matches          → the original fast match-index path (filteredSourceLines = nil)
+    ///   • Marks            → only marked source lines
+    ///   • Marks and matches → the sorted union of match + mark source lines
+    func recomputeFilteredVisibility() {
+        let mode = searchBar.visibility
+        switch mode {
+        case .matches:
+            // Fast path: rows ARE match indices; no explicit source list.
+            filteredView.filteredSourceLines = nil
+            filteredView.reloadFromEngine(lineCount: Int(engine.searchMatchCount()))
+        case .marks:
+            let marks = marksStore.marks.sorted()
+            filteredView.filteredSourceLines = marks
+            filteredView.reloadFromEngine(lineCount: marks.count)
+        case .marksAndMatches:
+            var set = marksStore.marks
+            let n = Int(engine.searchMatchCount())
+            for i in 0 ..< n {
+                let src = engine.searchMatchLine(at: UInt(i))
+                if src != UInt.max { set.insert(Int(src)) }
+            }
+            let union = set.sorted()
+            filteredView.filteredSourceLines = union
+            filteredView.reloadFromEngine(lineCount: union.count)
+        }
+        refreshOverview()
+    }
+
     /// Give keyboard focus to the search field.
     func focusSearchBar() {
         searchBar.focusSearchField()
@@ -343,6 +410,27 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     /// exact code path a picker selection takes.
     func applyPredefinedFilter(_ filter: PredefinedFilter) {
         searchBar.applyFilter(filter)
+    }
+
+    /// Set the filtered-view visibility mode (drives the same path as the combobox).
+    func setFilteredVisibility(_ mode: FilteredVisibility) {
+        searchBar.setVisibility(mode)
+    }
+
+    /// Number of rows the filtered (lower) view currently displays. In Matches mode
+    /// this equals searchMatchCount; in Marks / Marks-and-matches it's the explicit
+    /// source-line list length.
+    var filteredRowCount: Int { filteredView.lineCount }
+
+    /// The current "N matches found." label text (headless assertion on the bar).
+    var matchLabelText: String { searchBar.selfTestMatchLabelText }
+
+    /// Drive the match-count label exactly as the searchFinished delegate does, then
+    /// return the rendered text. Lets the headless harness assert the label format
+    /// without depending on the engine's async (offscreen-unreliable) search callback.
+    func selfTestMatchLabel(forCount count: Int) -> String {
+        searchBar.updateMatchCount(count, finished: true)
+        return searchBar.selfTestMatchLabelText
     }
 
     // MARK: - QuickFind (Wave 6)
@@ -511,8 +599,9 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     func kloggEngine(_ engine: Any, searchFinished matchCount: UInt) {
         searchBar.showProgress(false)
         searchBar.updateMatchCount(Int(matchCount), finished: true)
-        filteredView.reloadFromEngine(lineCount: Int(matchCount))
-        refreshOverview()   // plot the new match positions on the strip
+        // Reload the filtered view honouring the current visibility mode (the search
+        // result feeds Matches / Marks-and-matches; refreshOverview is called there).
+        recomputeFilteredVisibility()
     }
 }
 
@@ -584,6 +673,22 @@ final class TabController: NSViewController {
         currentTab?.applyPredefinedFilter(filter)
     }
 
+    /// Set the active tab's filtered-view visibility mode (klogg visibilityBox_).
+    func setFilteredVisibility(_ mode: FilteredVisibility) {
+        currentTab?.setFilteredVisibility(mode)
+    }
+
+    /// Rows the active tab's filtered view shows (Matches/Marks/Marks-and-matches).
+    var currentFilteredRowCount: Int { currentTab?.filteredRowCount ?? 0 }
+
+    /// The active tab's "N matches found." label text.
+    var currentMatchLabelText: String { currentTab?.matchLabelText ?? "" }
+
+    /// Render the active tab's match label for `count` (headless, deterministic).
+    func matchLabel(forCount count: Int) -> String {
+        currentTab?.selfTestMatchLabel(forCount: count) ?? ""
+    }
+
     /// Whether the active tab's overview strip is visible (defaults to the persisted
     /// preference when no tab is open, so the menu checkmark is sensible).
     var currentOverviewVisible: Bool {
@@ -609,8 +714,9 @@ final class TabController: NSViewController {
     func refreshCurrentTabViews() {
         guard let tab = currentTab else { return }
         tab.mainView.reloadFromEngine()
-        tab.filteredView.reloadFromEngine(lineCount: Int(tab.engine.searchMatchCount()))
-        tab.refreshOverview()
+        // Honour the active visibility mode so the filtered pane reflects Marks /
+        // Marks-and-matches, not just the raw match list (refreshes the overview too).
+        tab.recomputeFilteredVisibility()
     }
 
     /// Line count of the active tab's main view (for Go to Line range validation).

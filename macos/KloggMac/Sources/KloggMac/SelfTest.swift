@@ -29,6 +29,7 @@ enum SelfTest {
         out += "\n" + infoLineFormatTests(wc)
         out += "\n" + predefinedFilterTests(wc)
         out += "\n" + overviewTests(wc)
+        out += "\n" + filterBarTests(wc)
         out += "\n" + textWrapTests(wc)
         out += "\n" + preferencesLiveApplyTests(wc)
         out += "\n" + highlightersEditorTests(wc)
@@ -663,6 +664,84 @@ enum SelfTest {
 
         // Restore the default ON for subsequent runs and clean up.
         wc.selfTestToggleOverview()
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Filter bar / visibility-mode tests (Wave 11)
+
+    /// Prove the klogg crawler search-line + visibility combobox: open a file with
+    /// known matches, run a search, then exercise the three visibility modes (Matches /
+    /// Marks / Marks and matches) and assert the filtered (lower) pane row count for
+    /// each. Also asserts the "N matches found." label text and snapshots the layout
+    /// (search bar BETWEEN the two panes, lower pane populated).
+    private static func filterBarTests(_ wc: MainWindowController) -> String {
+        var s = "--- FILTER BAR / VISIBILITY TESTS ---\n"
+
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-filterbar-\(UUID().uuidString).log")
+        // 12 lines: 4 ERROR (rows 0,3,6,9), the rest INFO.
+        var lines: [String] = []
+        for i in 0..<12 { lines.append(i % 3 == 0 ? "ERROR event \(i)" : "INFO ok \(i)") }
+        let body = lines.joined(separator: "\n") + "\n"
+        guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write filter-bar test file\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        wc.selfTestOpen(path)
+        wait(timeout: 5.0) { wc.selfTestCurrentLineCount >= 12 }
+
+        // Run a search for the 4 ERROR lines.
+        wc.selfTestRunSearch(pattern: "ERROR", caseInsensitive: false, isRegex: false)
+        _ = wait(timeout: 5.0) { wc.selfTestSearchMatchCount == 4 }
+
+        // Default mode is "Marks and matches" — with no marks, that's just the 4 matches.
+        wc.selfTestSetFilteredVisibility(.matches)
+        _ = wait(timeout: 2.0) { wc.selfTestFilteredRowCount == 4 }
+        let matchesRows = wc.selfTestFilteredRowCount
+        s += matchesRows == 4
+            ? "PASS Matches mode: filtered pane shows 4 rows\n"
+            : "FAIL Matches mode: \(matchesRows) rows (expected 4)\n"
+
+        // "N matches found." label format (klogg searchInfoLine_). Driven through the
+        // same updateMatchCount path the searchFinished delegate uses; asserted
+        // deterministically (the engine's async search callback is offscreen-unreliable).
+        let label = wc.selfTestMatchLabel(forCount: 4)
+        let labelOne = wc.selfTestMatchLabel(forCount: 1)
+        s += (label == "4 matches found." && labelOne == "1 match found.")
+            ? "PASS match label: \"\(label)\" / \"\(labelOne)\"\n"
+            : "FAIL match label: \"\(label)\" / \"\(labelOne)\"\n"
+
+        // Mark two lines that are NOT matches (rows 1 and 2 → INFO lines).
+        _ = wc.selfTestToggleMark(line: 1)
+        _ = wc.selfTestToggleMark(line: 2)
+
+        // Marks mode: only the 2 marked source lines.
+        wc.selfTestSetFilteredVisibility(.marks)
+        _ = wait(timeout: 2.0) { wc.selfTestFilteredRowCount == 2 }
+        let marksRows = wc.selfTestFilteredRowCount
+        s += marksRows == 2
+            ? "PASS Marks mode: filtered pane shows 2 marked rows\n"
+            : "FAIL Marks mode: \(marksRows) rows (expected 2)\n"
+
+        // Marks and matches: union of 4 matches (0,3,6,9) + 2 marks (1,2) = 6 distinct.
+        wc.selfTestSetFilteredVisibility(.marksAndMatches)
+        _ = wait(timeout: 2.0) { wc.selfTestFilteredRowCount == 6 }
+        let unionRows = wc.selfTestFilteredRowCount
+        s += unionRows == 6
+            ? "PASS Marks-and-matches mode: union shows 6 rows (4 matches ∪ 2 marks)\n"
+            : "FAIL Marks-and-matches mode: \(unionRows) rows (expected 6)\n"
+
+        // Snapshot the klogg-style layout: search bar between the panes, lower pane filled.
+        let dir = ProcessInfo.processInfo.environment["KLOGG_SNAPSHOT_DIR"] ?? NSTemporaryDirectory()
+        let snap = (dir as NSString).appendingPathComponent("klogg-snapshot-filterbar.png")
+        s += wc.selfTestSnapshot(to: snap)
+            ? "PASS wrote \(snap)\n" : "FAIL filter-bar snapshot\n"
+
+        // Restore default mode + clean up.
+        wc.selfTestSetFilteredVisibility(.marksAndMatches)
+        wc.selfTestClearMarks()
         wc.closeCurrentTab(nil)
         return s
     }

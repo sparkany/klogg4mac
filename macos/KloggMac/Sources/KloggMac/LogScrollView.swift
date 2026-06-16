@@ -87,6 +87,15 @@ final class LogScrollView: NSScrollView {
     /// source line. Used so marks (identified by source line) work in both views.
     func sourceLine(forRow row: Int) -> Int { docView.sourceLine(forRow: row) }
 
+    /// Explicit source-line list driving the filtered view (klogg visibility modes).
+    /// When non-nil the filtered view renders exactly these source lines (fetched via
+    /// engine.lines), instead of the default match-index path. nil = pure Matches mode
+    /// (the original fast path). Has no effect on a .main view.
+    var filteredSourceLines: [Int]? {
+        get { docView.filteredSourceLines }
+        set { docView.filteredSourceLines = newValue }
+    }
+
     /// Toggle marks on the current selection (the &Mark / Unmark action).
     func markSelectedLines() { docView.markSelectedLines() }
 
@@ -461,6 +470,16 @@ final class LogDocumentView: NSView {
     /// Marks store backing the gutter mark indicators. Set by LogScrollView.
     var marksStore: MarksStore?
 
+    /// Explicit source-line list for the filtered view (klogg visibility modes).
+    /// When non-nil (and mode == .filtered) the view shows exactly these source lines,
+    /// fetched by absolute source index via engine.lines, so the lower pane can mix
+    /// matches + marks ("Marks and matches") or show marked lines only ("Marks").
+    /// nil = the original Matches-only fast path (rows are match indices).
+    var filteredSourceLines: [Int]?
+
+    /// True when this filtered view is rendering an explicit source-line list.
+    private var usesSourceList: Bool { mode == .filtered && filteredSourceLines != nil }
+
     /// Width of the mark-indicator zone painted at the left edge of the gutter when a
     /// marks store is present. Mirrors klogg's bullet/arrow zone (abstractlogview).
     private let markZoneWidth: CGFloat = 11
@@ -472,8 +491,43 @@ final class LogDocumentView: NSView {
         case .main:
             return row
         case .filtered:
+            // Explicit source-line list (visibility modes) takes precedence.
+            if let list = filteredSourceLines {
+                guard row >= 0, row < list.count else { return row }
+                return list[row]
+            }
             let src = engine.searchMatchLine(at: UInt(row))
             return src == UInt.max ? row : Int(src)
+        }
+    }
+
+    /// Fetch the text of the rows in [first, last] for this view's mode, honouring an
+    /// explicit filtered source-line list (visibility modes) when present.
+    private func fetchRows(first: Int, last: Int) -> [String] {
+        guard first <= last else { return [] }
+        switch mode {
+        case .main:
+            return engine.lines(in: NSRange(location: first, length: last - first + 1),
+                                expandTabs: true)
+        case .filtered:
+            if let list = filteredSourceLines {
+                // Source lines may be non-contiguous; fetch each by absolute index.
+                // Guard against stale source indices (a re-index can shrink the file
+                // while a marks-derived list still references higher lines).
+                let total = Int(engine.lineCount())
+                var out: [String] = []
+                out.reserveCapacity(last - first + 1)
+                for row in first ... last {
+                    guard row >= 0, row < list.count else { out.append(""); continue }
+                    let s = list[row]
+                    guard s >= 0, s < total else { out.append(""); continue }
+                    let one = engine.lines(in: NSRange(location: s, length: 1), expandTabs: true)
+                    out.append(one.first ?? "")
+                }
+                return out
+            }
+            return engine.filteredLines(in: NSRange(location: first, length: last - first + 1),
+                                        expandTabs: true)
         }
     }
 
@@ -519,13 +573,7 @@ final class LogDocumentView: NSView {
         guard let range = selection.state.normalizedRange else { return nil }
         let lo = max(0, min(range.lowerBound, currentLineCount - 1))
         // Prefer the draw cache; fall back to a single-line engine fetch.
-        let raw = visibleLineCache[lo] ?? {
-            let r = NSRange(location: lo, length: 1)
-            switch mode {
-            case .main:     return engine.lines(in: r, expandTabs: true).first
-            case .filtered: return engine.filteredLines(in: r, expandTabs: true).first
-            }
-        }() ?? ""
+        let raw = visibleLineCache[lo] ?? fetchRows(first: lo, last: lo).first ?? ""
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
@@ -562,6 +610,7 @@ final class LogDocumentView: NSView {
         case .main:
             return Int(engine.lineCount())
         case .filtered:
+            if let list = filteredSourceLines { return list.count }
             return Int(engine.searchMatchCount())
         }
     }
@@ -610,14 +659,7 @@ final class LogDocumentView: NSView {
         guard firstRow <= lastRow else { return }
 
         // Fetch visible lines from engine (O(visible rows)).
-        let range = NSRange(location: firstRow, length: lastRow - firstRow + 1)
-        let fetched: [String]
-        switch mode {
-        case .main:
-            fetched = engine.lines(in: range, expandTabs: true)
-        case .filtered:
-            fetched = engine.filteredLines(in: range, expandTabs: true)
-        }
+        let fetched = fetchRows(first: firstRow, last: lastRow)
 
         // Gutter visibility is preference-driven: when line numbers are off for
         // this mode, the gutter collapses to width 0 and text starts at the left.
@@ -724,12 +766,7 @@ final class LogDocumentView: NSView {
         let batch = 64
         while row < currentLineCount && y < stopY {
             let end = min(currentLineCount - 1, row + batch - 1)
-            let range = NSRange(location: row, length: end - row + 1)
-            let fetched: [String]
-            switch mode {
-            case .main:     fetched = engine.lines(in: range, expandTabs: true)
-            case .filtered: fetched = engine.filteredLines(in: range, expandTabs: true)
-            }
+            let fetched = fetchRows(first: row, last: end)
             for raw in fetched {
                 guard y < stopY else { break }
                 let lineText = hideAnsi ? LogDocumentView.stripAnsi(raw) : raw
@@ -753,13 +790,7 @@ final class LogDocumentView: NSView {
             ]
             let innerPad: CGFloat = 6
             for entry in rowYs {
-                let displayNum: Int
-                if mode == .filtered {
-                    let src = engine.searchMatchLine(at: UInt(entry.row))
-                    displayNum = (src == UInt.max) ? (entry.row + 1) : Int(src) + 1
-                } else {
-                    displayNum = entry.row + 1
-                }
+                let displayNum = sourceLine(forRow: entry.row) + 1
                 let label = "\(displayNum)" as NSString
                 let size  = label.size(withAttributes: attrs)
                 let lx = scrollX + gutterWidth - innerPad - size.width
@@ -889,15 +920,9 @@ final class LogDocumentView: NSView {
         ]
         let innerPad: CGFloat = 6
         for row in firstRow ... lastRow {
-            // In the filtered view, show each match's ORIGINAL source line number
+            // In the filtered view, show each row's ORIGINAL source line number
             // (as klogg does); in the main view, the row index is the line number.
-            let displayNum: Int
-            if mode == .filtered {
-                let src = engine.searchMatchLine(at: UInt(row))
-                displayNum = (src == UInt.max) ? (row + 1) : Int(src) + 1
-            } else {
-                displayNum = row + 1
-            }
+            let displayNum = sourceLine(forRow: row) + 1
             let label = "\(displayNum)" as NSString
             let size  = label.size(withAttributes: attrs)
             let x = scrollX + gutterWidth - innerPad - size.width
@@ -1099,15 +1124,7 @@ final class LogDocumentView: NSView {
         var cursor    = lo
         while cursor <= hi {
             let batchEnd = min(cursor + chunkSize - 1, hi)
-            let nsRange  = NSRange(location: cursor, length: batchEnd - cursor + 1)
-            let fetched: [String]
-            switch mode {
-            case .main:
-                fetched = engine.lines(in: nsRange, expandTabs: true)
-            case .filtered:
-                fetched = engine.filteredLines(in: nsRange, expandTabs: true)
-            }
-            parts.append(contentsOf: fetched)
+            parts.append(contentsOf: fetchRows(first: cursor, last: batchEnd))
             cursor = batchEnd + 1
         }
 
@@ -1129,12 +1146,7 @@ final class LogDocumentView: NSView {
         let chunkSize = 10_000
         while cursor <= hi {
             let batchEnd = min(cursor + chunkSize - 1, hi)
-            let nsRange  = NSRange(location: cursor, length: batchEnd - cursor + 1)
-            let fetched: [String]
-            switch mode {
-            case .main:     fetched = engine.lines(in: nsRange, expandTabs: true)
-            case .filtered: fetched = engine.filteredLines(in: nsRange, expandTabs: true)
-            }
+            let fetched = fetchRows(first: cursor, last: batchEnd)
             for (i, txt) in fetched.enumerated() {
                 let num = sourceLine(forRow: cursor + i) + 1
                 parts.append("\(num)\t\(txt)")

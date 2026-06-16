@@ -14,15 +14,37 @@
 
 import AppKit
 
+/// What the filtered (lower) pane displays. Mirrors klogg's
+/// LogFilteredData::VisibilityFlags (Marks / Matches), selected via the
+/// "Marks and matches" combobox at the left of the search line
+/// (crawlerwidget.cpp: visibilityBox_).
+enum FilteredVisibility: Int, CaseIterable {
+    case marksAndMatches = 0   // klogg default (Marks | Matches)
+    case marks           = 1
+    case matches         = 2
+
+    /// The combobox item titles, in klogg's order.
+    var title: String {
+        switch self {
+        case .marksAndMatches: return "Marks and matches"
+        case .marks:           return "Marks"
+        case .matches:         return "Matches"
+        }
+    }
+}
+
 final class SearchBarView: NSView {
 
     // MARK: - Callbacks (set by CrawlerTab)
 
     var onSearch: ((_ pattern: String, _ caseInsensitive: Bool, _ isRegex: Bool) -> Void)?
     var onCancel: (() -> Void)?
+    /// Fired when the user picks a different filtered-view visibility mode.
+    var onVisibilityChanged: ((FilteredVisibility) -> Void)?
 
     // MARK: - Controls
 
+    private let visibilityPopup = NSPopUpButton()   // "Marks and matches ▾" view-mode selector
     private let filterPopup   = NSPopUpButton()   // ▾ predefined filters picker
     private let searchField   = NSSearchField()
     private let caseButton    = NSButton()   // Aa — toggle case-sensitive
@@ -34,6 +56,8 @@ final class SearchBarView: NSView {
 
     private var isCaseInsensitive: Bool = true   // matches klogg default
     private var isRegex: Bool = false
+    /// Current filtered-view visibility (klogg default: Marks and matches).
+    private(set) var visibility: FilteredVisibility = .marksAndMatches
 
     // MARK: - Init
 
@@ -86,6 +110,22 @@ final class SearchBarView: NSView {
         wantsLayer = true
         applyChromeBackground()
 
+        // View-mode selector ("Marks and matches ▾"): chooses what the lower pane
+        // shows (klogg visibilityBox_). A pop-up (not pull-down) so the current mode
+        // shows on the button. Selecting an item re-filters the lower pane.
+        visibilityPopup.translatesAutoresizingMaskIntoConstraints = false
+        visibilityPopup.pullsDown = false
+        visibilityPopup.bezelStyle = .rounded
+        visibilityPopup.font = .systemFont(ofSize: 11)
+        visibilityPopup.toolTip = "What to show in the filtered view"
+        visibilityPopup.target = self
+        visibilityPopup.action = #selector(selectVisibility(_:))
+        for mode in FilteredVisibility.allCases {
+            visibilityPopup.addItem(withTitle: mode.title)
+        }
+        visibilityPopup.selectItem(at: visibility.rawValue)
+        addSubview(visibilityPopup)
+
         // Predefined-filters picker (▾). The first item is a static title; choosing a
         // filter fills the field with its pattern + flags and runs the search.
         filterPopup.translatesAutoresizingMaskIntoConstraints = false
@@ -134,15 +174,16 @@ final class SearchBarView: NSView {
         regexButton.action = #selector(toggleRegex(_:))
         addSubview(regexButton)
 
-        // Match count label.
+        // Match count label ("N matches found.") — right-aligned, klogg searchInfoLine_.
         matchLabel.translatesAutoresizingMaskIntoConstraints = false
         matchLabel.isEditable = false
         matchLabel.isBordered = false
         matchLabel.drawsBackground = false
-        matchLabel.alignment = .left
+        matchLabel.alignment = .right
         matchLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         matchLabel.textColor = .secondaryLabelColor
         matchLabel.stringValue = ""
+        matchLabel.lineBreakMode = .byTruncatingTail
         addSubview(matchLabel)
 
         // Spinner (hidden until a search is running).
@@ -153,34 +194,49 @@ final class SearchBarView: NSView {
         addSubview(spinner)
 
         // Height: compact — 28 pt like a toolbar.
+        // Layout (klogg searchLineLayout order, left→right): view-mode selector,
+        // Aa, .*, predefined-filters ▾, search field, then the right-aligned
+        // "N matches found." label + spinner.
         let height: CGFloat = 28
+        let matchTrailing = matchLabel.trailingAnchor.constraint(
+            equalTo: spinner.leadingAnchor, constant: -6)
+        // Let the match label shrink before the search field does.
+        matchLabel.setContentHuggingPriority(.required, for: .horizontal)
+        matchLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: height),
 
+            // Left cluster: view-mode | Aa | .* | filters ▾
+            visibilityPopup.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            visibilityPopup.centerYAnchor.constraint(equalTo: centerYAnchor),
+            visibilityPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 150),
+
+            caseButton.leadingAnchor.constraint(equalTo: visibilityPopup.trailingAnchor, constant: 6),
+            caseButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            caseButton.widthAnchor.constraint(equalToConstant: 32),
+
+            regexButton.leadingAnchor.constraint(equalTo: caseButton.trailingAnchor, constant: 4),
+            regexButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            regexButton.widthAnchor.constraint(equalToConstant: 32),
+
+            filterPopup.leadingAnchor.constraint(equalTo: regexButton.trailingAnchor, constant: 6),
+            filterPopup.centerYAnchor.constraint(equalTo: centerYAnchor),
+            filterPopup.widthAnchor.constraint(equalToConstant: 44),
+
+            // Search field stretches to the match label.
+            searchField.leadingAnchor.constraint(equalTo: filterPopup.trailingAnchor, constant: 6),
+            searchField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            searchField.trailingAnchor.constraint(equalTo: matchLabel.leadingAnchor, constant: -8),
+
+            // Right cluster: "N matches found." + spinner.
             spinner.centerYAnchor.constraint(equalTo: centerYAnchor),
             spinner.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             spinner.widthAnchor.constraint(equalToConstant: 16),
             spinner.heightAnchor.constraint(equalToConstant: 16),
 
             matchLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            matchLabel.trailingAnchor.constraint(equalTo: spinner.leadingAnchor, constant: -6),
-            matchLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 80),
-
-            regexButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            regexButton.trailingAnchor.constraint(equalTo: matchLabel.leadingAnchor, constant: -6),
-            regexButton.widthAnchor.constraint(equalToConstant: 32),
-
-            caseButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            caseButton.trailingAnchor.constraint(equalTo: regexButton.leadingAnchor, constant: -4),
-            caseButton.widthAnchor.constraint(equalToConstant: 32),
-
-            filterPopup.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            filterPopup.centerYAnchor.constraint(equalTo: centerYAnchor),
-            filterPopup.widthAnchor.constraint(equalToConstant: 44),
-
-            searchField.leadingAnchor.constraint(equalTo: filterPopup.trailingAnchor, constant: 6),
-            searchField.centerYAnchor.constraint(equalTo: centerYAnchor),
-            searchField.trailingAnchor.constraint(equalTo: caseButton.leadingAnchor, constant: -8),
+            matchTrailing,
+            matchLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 90),
         ])
 
         // Bottom separator line.
@@ -328,14 +384,34 @@ final class SearchBarView: NSView {
     ///   - count: Number of matches found so far.
     ///   - finished: True when search has completed; false for interim progress.
     func updateMatchCount(_ count: Int, finished: Bool) {
+        // klogg's searchInfoLine_ text: "N matches found." (singular "1 match found.").
         if count == 0 && !finished {
             matchLabel.stringValue = ""
         } else if finished {
-            matchLabel.stringValue = count == 1 ? "1 match" : "\(count) matches"
+            matchLabel.stringValue = count == 1 ? "1 match found." : "\(count) matches found."
             matchLabel.textColor = count == 0 ? .systemRed : .secondaryLabelColor
         } else {
             matchLabel.stringValue = "\(count)…"
             matchLabel.textColor = .secondaryLabelColor
         }
     }
+
+    // MARK: - Filtered-view visibility (klogg visibilityBox_)
+
+    @objc private func selectVisibility(_ sender: NSPopUpButton) {
+        guard let mode = FilteredVisibility(rawValue: sender.indexOfSelectedItem) else { return }
+        visibility = mode
+        onVisibilityChanged?(mode)
+    }
+
+    /// Programmatically set the filtered-view visibility mode (headless tests +
+    /// menu wiring). Updates the button and fires the change callback.
+    func setVisibility(_ mode: FilteredVisibility) {
+        visibility = mode
+        visibilityPopup.selectItem(at: mode.rawValue)
+        onVisibilityChanged?(mode)
+    }
+
+    /// Current match-count label text (headless assertions).
+    var selfTestMatchLabelText: String { matchLabel.stringValue }
 }
