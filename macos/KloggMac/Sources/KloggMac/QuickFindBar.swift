@@ -125,10 +125,14 @@ final class QuickFindBar: NSView {
         closeButton.action = #selector(closeAction(_:))
         addSubview(closeButton)
 
-        let h: CGFloat = 30
+        // NOTE: the bar's HEIGHT is owned solely by the container (TabController keeps a
+        // single mutable height constraint it animates between 0 collapsed and 30 shown).
+        // We must NOT add our own `height == 30` here: an always-active intrinsic 30 would
+        // be mutually exclusive with the container's `== 0` while collapsed, producing the
+        // "QuickFindBar.height == 30 vs == 0" conflicting-constraints log. Internal controls
+        // pin to centerYAnchor, so they lay out correctly at whatever height the container
+        // sets.
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: h),
-
             prevButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             prevButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             prevButton.widthAnchor.constraint(equalToConstant: 28),
