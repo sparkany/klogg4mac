@@ -43,6 +43,7 @@ enum SelfTest {
         out += "\n" + edgeRobustnessTests(wc)
         out += "\n" + decompressionTests(wc)
         out += "\n" + fontZoomTests(wc)
+        out += "\n" + saveToFileTests(wc)
         out += "\n" + shortcutAudit()
         out += "===== END SELFTEST =====\n"
         FileHandle.standardError.write(out.data(using: .utf8)!)
@@ -1614,6 +1615,45 @@ enum SelfTest {
         s += p.fontSize == AppPreferences.maxFontSize
             ? "PASS upper clamp holds at \(AppPreferences.maxFontSize)\n"
             : "FAIL upper clamp: \(p.fontSize)\n"
+
+        while wc.selfTestTabCount > startTabs { wc.closeCurrentTab(nil) }
+        return s
+    }
+
+    // MARK: - Save to file (Wave 14)
+
+    /// Prove "Save to file" (klogg AbstractLogView::saveToFile) writes the WHOLE view:
+    /// open a known file, save it to a temp path, and assert the saved content has the
+    /// same line count and identical first/last lines.
+    private static func saveToFileTests(_ wc: MainWindowController) -> String {
+        var s = "--- SAVE TO FILE TESTS ---\n"
+        let n = 37
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-save-\(UUID().uuidString).log")
+        let body = (1...n).map { "save line \($0)" }.joined(separator: "\n") + "\n"
+        guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write source\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let startTabs = wc.selfTestTabCount
+        wc.selfTestOpen(path)
+        _ = wait { wc.selfTestCurrentLineCount >= n }
+
+        let outURL = URL(fileURLWithPath: (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-saveout-\(UUID().uuidString).txt"))
+        defer { try? FileManager.default.removeItem(at: outURL) }
+        let ok = wc.selfTestSaveAllToFile(to: outURL)
+
+        let saved = (try? String(contentsOf: outURL, encoding: .utf8)) ?? ""
+        let savedLines = saved.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.isEmpty }
+        let countOK = savedLines.count == n
+        let firstOK = savedLines.first == "save line 1"
+        let lastOK  = savedLines.last == "save line \(n)"
+        s += (ok && countOK && firstOK && lastOK)
+            ? "PASS save-to-file wrote whole view: \(savedLines.count) lines (first/last match)\n"
+            : "FAIL save-to-file: ok=\(ok) count=\(savedLines.count)/\(n) first=\(savedLines.first ?? "nil") last=\(savedLines.last ?? "nil")\n"
 
         while wc.selfTestTabCount > startTabs { wc.closeCurrentTab(nil) }
         return s

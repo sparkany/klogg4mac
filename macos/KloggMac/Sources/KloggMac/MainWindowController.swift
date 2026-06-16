@@ -926,6 +926,11 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     /// The active tab's main-view font point size (tracks the font-size preference), or 0.
     var selfTestMainFontPointSize: CGFloat { tabController.currentTab?.mainView.fontPointSize ?? 0 }
 
+    /// Headless "Save to file": write the active tab's main view to `url`. False if no tab.
+    func selfTestSaveAllToFile(to url: URL) -> Bool {
+        tabController.currentTab?.mainView.saveAllToFileForTest(to: url) ?? false
+    }
+
     /// Whether the active tab's main-view gutter is currently drawn (line numbers on).
     var selfTestMainGutterWidth: CGFloat { tabController.currentTab?.mainView.gutterWidth ?? 0 }
 

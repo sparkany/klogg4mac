@@ -81,6 +81,10 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         // Both views draw + toggle the same per-file marks (by source line).
         mainView.marksStore = marksStore
         filteredView.marksStore = marksStore
+        // Default save-to-file name derives from the user-facing file name.
+        let baseName = (self.displayPath as NSString).lastPathComponent
+        mainView.sourceName = baseName
+        filteredView.sourceName = baseName
         // Repaint both views when marks change (e.g. toggled from the other view).
         NotificationCenter.default.addObserver(self, selector: #selector(marksChanged),
                                                name: .marksDidChange, object: marksStore)

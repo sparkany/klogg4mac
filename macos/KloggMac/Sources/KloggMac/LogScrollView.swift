@@ -220,6 +220,16 @@ final class LogScrollView: NSScrollView {
     /// integer row-height quantization hides the change.
     var fontPointSize: CGFloat { docView.logFont.pointSize }
 
+    /// Default base name used when saving the whole view to a file (klogg "Save to
+    /// file"). Set by the owning tab to the source file's base name.
+    var sourceName: String? {
+        get { docView.docViewSourceName }
+        set { docView.docViewSourceName = newValue }
+    }
+
+    /// Headless "Save to file": write the entire view to `url`. Returns true on success.
+    func saveAllToFileForTest(to url: URL) -> Bool { docView.saveAllToFileForTest(to: url) }
+
     /// The effective line-number gutter width: the gutter's computed width when the
     /// line-number preference for this view's mode is ON, otherwise 0 (gutter hidden).
     /// Lets the harness assert the gutter shows/hides as the preference toggles.
@@ -1280,6 +1290,7 @@ final class LogDocumentView: NSView {
     @objc private func ctxSendScratchpad(_ sender: Any?)    { contextActions?.sendToScratchpad?(selectionText) }
     @objc private func ctxReplaceScratchpad(_ sender: Any?) { contextActions?.replaceScratchpad?(selectionText) }
     @objc private func ctxSaveToFile(_ sender: Any?)        { saveSelectionToFile() }
+    @objc private func ctxSaveAllToFile(_ sender: Any?)     { saveAllToFile() }
     @objc private func ctxSetSearchStart(_ sender: Any?) {
         guard let line = selectedSourceLines.first else { return }
         contextActions?.setSearchStart?(line)
@@ -1311,6 +1322,59 @@ final class LogDocumentView: NSView {
             try? text.write(to: url, atomically: true, encoding: .utf8)
         }
     }
+
+    /// Save the ENTIRE current view (the whole file in the main view, or all matches in
+    /// the filtered view) to a file, mirroring klogg's AbstractLogView::saveToFile
+    /// (abstractlogview.cpp:1411 → saveLinesToFile over [0, getNbLine)). Streams the
+    /// content in chunks so a multi-million-line file doesn't have to materialise in
+    /// memory at once. Headless-safe: no-op without a window.
+    private func saveAllToFile() {
+        guard window != nil else { return }
+        let total = effectiveLineCount()
+        guard total > 0 else { return }
+        let defaultName = (docViewSourceName ?? "log") + ".txt"
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = defaultName
+        let modeCapture = mode
+        let engineCapture = engine
+        panel.begin { resp in
+            guard resp == .OK, let url = panel.url else { return }
+            _ = Self.streamLines(total: total, mode: modeCapture, engine: engineCapture, to: url)
+        }
+    }
+
+    /// Stream all `total` lines of `mode` from `engine` to `url` in chunks. Returns true
+    /// on success. Shared by the interactive Save-to-file and the headless harness.
+    @discardableResult
+    static func streamLines(total: Int, mode: LogViewMode, engine: KloggEngine, to url: URL) -> Bool {
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        guard let handle = try? FileHandle(forWritingTo: url) else { return false }
+        defer { try? handle.close() }
+        let chunkSize = 50_000
+        var cursor = 0
+        while cursor < total {
+            let count = min(chunkSize, total - cursor)
+            let nsRange = NSRange(location: cursor, length: count)
+            let lines: [String]
+            switch mode {
+            case .main:     lines = engine.lines(in: nsRange, expandTabs: false)
+            case .filtered: lines = engine.filteredLines(in: nsRange, expandTabs: false)
+            }
+            let block = lines.joined(separator: "\n") + "\n"
+            if let data = block.data(using: .utf8) { handle.write(data) }
+            cursor += count
+        }
+        return true
+    }
+
+    /// Headless wrapper: write the entire view to `url` without a save panel. Reads the
+    /// count straight from the engine (the view may not be laid out in --selftest).
+    func saveAllToFileForTest(to url: URL) -> Bool {
+        Self.streamLines(total: effectiveLineCount(), mode: mode, engine: engine, to: url)
+    }
+
+    /// Best-effort source name for the default save filename (set by the owning tab).
+    var docViewSourceName: String?
 
     // MARK: - Right-click / context menu
 
@@ -1425,7 +1489,15 @@ final class LogDocumentView: NSView {
         let save = NSMenuItem(title: "Save selected to file",
                               action: #selector(ctxSaveToFile(_:)), keyEquivalent: "")
         save.target = self
+        save.isEnabled = selection.state.normalizedRange != nil
         menu.addItem(save)
+
+        // Save the entire view (whole file / all filtered matches) — klogg "Save to file".
+        let saveAll = NSMenuItem(title: "Save to file",
+                                 action: #selector(ctxSaveAllToFile(_:)), keyEquivalent: "")
+        saveAll.target = self
+        saveAll.isEnabled = currentLineCount > 0
+        menu.addItem(saveAll)
 
         return menu
     }
