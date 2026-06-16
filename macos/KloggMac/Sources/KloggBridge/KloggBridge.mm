@@ -25,6 +25,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 // Qt
 #include <QCoreApplication>
@@ -118,6 +119,44 @@ struct KloggEngineImpl {
     std::unique_ptr<LogData>          logData;
     std::unique_ptr<LogFilteredData>  filteredData;   // created after logData
     bool                              attached = false; // a file has been attachFile'd
+
+    // --- Search-result SNAPSHOT (race-free read path) ---------------------------
+    // LogFilteredData's result set (matching_lines_ / marks_and_matches_) is a CRoaring
+    // bitmap that the engine MUTATES on the Qt thread in handleSearchProgressed
+    // (matching_lines_ |= newMatches) while a search runs. CRoaring bitmaps are not
+    // thread-safe, so the UI/main thread must NEVER read the live LogFilteredData. Instead
+    // we keep a plain, bridge-owned snapshot: every time the search progresses/finishes,
+    // we copy (on the Qt thread, where CRoaring access is safe) the match count and the
+    // matched source-line numbers into snapMatchLines_. The main-thread read accessors
+    // (searchMatchCount / searchMatchLineAtIndex / filteredLinesInRange) lock snapMutex_
+    // and read ONLY this immutable copy — they never touch the live bitmap. This removes
+    // the data race without marshalling each read onto the Qt thread (which stalls the UI
+    // and can deadlock against the search worker's QThreadPool::waitForDone()).
+    std::mutex                        snapMutex;
+    std::vector<uint64_t>             snapMatchLines; // source-line index per match, in order
+    uint64_t                          snapMatchCount = 0;
+
+    // Rebuild the snapshot from the live filtered data. MUST be called on the Qt thread.
+    void rebuildSearchSnapshot() {
+        std::vector<uint64_t> lines;
+        const uint64_t count =
+            static_cast<uint64_t>(filteredData->getNbMatches().get());
+        lines.reserve(static_cast<size_t>(count));
+        for (uint64_t i = 0; i < count; ++i) {
+            const LineNumber src = filteredData->getMatchingLineNumber(
+                LineNumber(static_cast<LineNumber::UnderlyingType>(i)));
+            lines.push_back(static_cast<uint64_t>(src.get()));
+        }
+        std::lock_guard<std::mutex> guard(snapMutex);
+        snapMatchCount = count;
+        snapMatchLines = std::move(lines);
+    }
+
+    void clearSearchSnapshot() {
+        std::lock_guard<std::mutex> guard(snapMutex);
+        snapMatchCount = 0;
+        snapMatchLines.clear();
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -176,10 +215,17 @@ struct KloggEngineImpl {
         },
         Qt::QueuedConnection);
 
-    QObject::connect(
-        _impl->filteredData.get(), &LogFilteredData::searchProgressed,
-        _impl->context.get(),
-        [weakSelf](LinesCount nbMatches, int progress, LineNumber /*initialLine*/) {
+    {
+        KloggEngineImpl* impl = _impl;   // owned by self; valid while connection lives
+        QObject::connect(
+            _impl->filteredData.get(), &LogFilteredData::searchProgressed,
+            _impl->context.get(),
+            [weakSelf, impl](LinesCount nbMatches, int progress, LineNumber /*initialLine*/) {
+            // Runs on the Qt thread. Refresh the race-free snapshot HERE — this is the only
+            // place we read the live CRoaring result set, and it is the same thread that
+            // mutates it, so the access is safe and serialized with handleSearchProgressed.
+            impl->rebuildSearchSnapshot();
+
             NSUInteger matches = static_cast<NSUInteger>(nbMatches.get());
             int pct = progress;
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -197,6 +243,7 @@ struct KloggEngineImpl {
             });
         },
         Qt::QueuedConnection);
+    }
 
     // File-on-disk changes (follow / file-watch). The engine has already enqueued a
     // re-index by the time this fires; loadingFinished follows. We forward the status
@@ -373,6 +420,10 @@ static RegularExpressionPattern makePattern(NSString* pattern, BOOL caseInsensit
     QMetaObject::invokeMethod(
         impl->context.get(),
         [impl, regExp, start, end]() {
+            // Invalidate the snapshot as the new search begins (the engine clears its
+            // result set inside runSearch); the first searchProgressed will refill it.
+            // Done here on the Qt thread so reads never see the previous search's results.
+            impl->clearSearchSnapshot();
             // Clamp the range to the file: end == NSUIntegerMax (or beyond EOF) means
             // "to end of file"; an empty/invalid range degenerates to a whole-file search
             // so the UI never silently returns nothing for a bad limit.
@@ -450,41 +501,51 @@ static RegularExpressionPattern makePattern(NSString* pattern, BOOL caseInsensit
 
 // MARK: - Filtered data access (valid after searchFinished)
 
+// All three accessors read ONLY the bridge-owned snapshot (see KloggEngineImpl), never
+// the live LogFilteredData/CRoaring bitmap, so they are safe to call from the main thread
+// while a search mutates the engine on the Qt thread.
+
 - (NSUInteger)searchMatchCount {
     if (!_impl) return 0;
-    return static_cast<NSUInteger>(_impl->filteredData->getNbMatches().get());
+    std::lock_guard<std::mutex> guard(_impl->snapMutex);
+    return static_cast<NSUInteger>(_impl->snapMatchCount);
 }
 
 - (NSUInteger)searchMatchLineAtIndex:(NSUInteger)matchIndex {
     if (!_impl) return NSNotFound;
-    LinesCount nbMatches = _impl->filteredData->getNbMatches();
-    LineNumber idx(static_cast<LineNumber::UnderlyingType>(matchIndex));
-    if (!(idx < LineNumber(nbMatches.get()))) return NSNotFound;
-    return static_cast<NSUInteger>(
-        _impl->filteredData->getMatchingLineNumber(idx).get());
+    std::lock_guard<std::mutex> guard(_impl->snapMutex);
+    if (matchIndex >= _impl->snapMatchLines.size()) return NSNotFound;
+    return static_cast<NSUInteger>(_impl->snapMatchLines[matchIndex]);
 }
 
 - (NSArray<NSString*>*)filteredLinesInRange:(NSRange)range expandTabs:(BOOL)expand {
     if (!_impl) return @[];
-    LogFilteredData* fd = _impl->filteredData.get();
-    LinesCount total = fd->getNbMatches();
 
-    LineNumber::UnderlyingType first =
-        static_cast<LineNumber::UnderlyingType>(range.location);
-    if (LineNumber(first) >= LineNumber(total.get())) return @[];
+    // Resolve the requested filtered rows to SOURCE line numbers from the snapshot
+    // (lock briefly, copy out), then read the line TEXT from LogData — whose reads are
+    // internally serialized (IndexingData accessor lock + FileHolder file mutex) and so
+    // are safe from the main thread. We never touch the CRoaring result set here.
+    std::vector<uint64_t> srcLines;
+    {
+        std::lock_guard<std::mutex> guard(_impl->snapMutex);
+        const uint64_t total = _impl->snapMatchCount;
+        uint64_t first = static_cast<uint64_t>(range.location);
+        if (first >= total) return @[];
+        uint64_t available = total - first;
+        uint64_t requested = static_cast<uint64_t>(range.length);
+        uint64_t count     = (requested < available) ? requested : available;
+        srcLines.reserve(static_cast<size_t>(count));
+        for (uint64_t i = 0; i < count && (first + i) < _impl->snapMatchLines.size(); ++i)
+            srcLines.push_back(_impl->snapMatchLines[static_cast<size_t>(first + i)]);
+    }
 
-    uint64_t available = total.get() - first;
-    uint64_t requested = static_cast<uint64_t>(range.length);
-    uint64_t count     = (requested < available) ? requested : available;
-
-    klogg::vector<QString> lines =
-        expand
-        ? fd->getExpandedLines(LineNumber(first), LinesCount(count))
-        : fd->getLines(LineNumber(first), LinesCount(count));
-
-    NSMutableArray<NSString*>* out = [NSMutableArray arrayWithCapacity:lines.size()];
-    for (const QString& qs : lines)
+    LogData* ld = _impl->logData.get();
+    NSMutableArray<NSString*>* out = [NSMutableArray arrayWithCapacity:srcLines.size()];
+    for (uint64_t src : srcLines) {
+        LineNumber ln(static_cast<LineNumber::UnderlyingType>(src));
+        const QString qs = expand ? ld->getExpandedLineString(ln) : ld->getLineString(ln);
         [out addObject:qs.toNSString()];
+    }
     return out;
 }
 
