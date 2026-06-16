@@ -93,6 +93,7 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
             self.window?.title = title
             self.updateOpenedFilesMenu()
             self.refreshFollowUI()
+            self.refreshFavoriteIcon()
             // Persist the open-files set whenever tabs change so the last session is
             // always current (covers open, close, and tab switches).
             self.saveSession()
@@ -505,19 +506,28 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         guard let path = tabController.currentFilePath else { return }
         FavoritesStore.shared.add(path: path)
         FavoritesMenu.shared.rebuild()
+        refreshFavoriteIcon()
     }
 
     @objc func removeFromFavorites(_ sender: Any?) {
         guard let path = tabController.currentFilePath else { return }
         FavoritesStore.shared.remove(path: path)
         FavoritesMenu.shared.rebuild()
+        refreshFavoriteIcon()
     }
 
     /// Toolbar ★: add the current file to favorites, or remove it if already there.
     @objc func toggleFavorite(_ sender: Any?) {
         guard let path = tabController.currentFilePath else { return }
-        FavoritesStore.shared.toggle(path: path)
+        _ = FavoritesStore.shared.toggle(path: path)
         FavoritesMenu.shared.rebuild()
+        refreshFavoriteIcon()
+    }
+
+    /// Sync the ★ toolbar icon (filled/empty) with the current file's favorite state.
+    func refreshFavoriteIcon() {
+        let fav = tabController.currentFilePath.map { FavoritesStore.shared.isFavorite($0) } ?? false
+        toolbar.updateFavorite(isFavorite: fav)
     }
 
     /// Open a favorite from the Favorites menu.

@@ -33,6 +33,19 @@ final class AppToolbar: NSObject, NSToolbarDelegate {
     /// The hosted status bar view — exposed so TabController can update it.
     let statusBar = StatusBarView(frame: NSRect(x: 0, y: 0, width: 400, height: 22))
 
+    /// The ★ toolbar item, kept so its icon can reflect favorite state.
+    private weak var favoriteItem: NSToolbarItem?
+
+    /// Update the ★ button to show filled/empty + matching tooltip for the
+    /// current file's favorite state (immediate visual feedback on toggle).
+    func updateFavorite(isFavorite: Bool) {
+        guard let item = favoriteItem else { return }
+        let symbol = isFavorite ? "star.fill" : "star"
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Favorite")
+        item.toolTip = isFavorite ? "Remove current file from favorites"
+                                  : "Add current file to favorites"
+    }
+
     // Action target for Open (wired by the window controller).
     weak var openTarget: AnyObject?
     @objc var openAction: Selector = #selector(AppMenuActions.openDocument(_:))
@@ -104,6 +117,7 @@ final class AppToolbar: NSObject, NSToolbarDelegate {
                                  accessibilityDescription: "Favorite") {
                 item.image = img
             }
+            favoriteItem = item
             item.action = #selector(AppMenuActions.toggleFavorite(_:))
             item.target = nil   // first responder chain (validated by MainWindowController)
             return item
