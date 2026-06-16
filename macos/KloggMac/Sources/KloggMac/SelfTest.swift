@@ -1656,6 +1656,13 @@ enum SelfTest {
             ? "PASS save-to-file wrote whole view: \(savedLines.count) lines (first/last match)\n"
             : "FAIL save-to-file: ok=\(ok) count=\(savedLines.count)/\(n) first=\(savedLines.first ?? "nil") last=\(savedLines.last ?? "nil")\n"
 
+        // Two-step range selection (klogg setSelectionStart/setSelectionEnd): selecting
+        // lines [5, 20] should yield 16 selected lines.
+        let selCount = wc.selfTestSelectRange(start: 5, end: 20)
+        s += selCount == 16
+            ? "PASS set-selection-start/end: lines [5,20] → \(selCount) selected\n"
+            : "FAIL set-selection-start/end: got \(selCount) (expected 16)\n"
+
         while wc.selfTestTabCount > startTabs { wc.closeCurrentTab(nil) }
         return s
     }

@@ -931,6 +931,12 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         tabController.currentTab?.mainView.saveAllToFileForTest(to: url) ?? false
     }
 
+    /// Headless two-step range selection (klogg setSelectionStart/End): returns the
+    /// number of lines selected, or 0 if no tab.
+    func selfTestSelectRange(start: Int, end: Int) -> Int {
+        tabController.currentTab?.mainView.selectRangeForTest(start: start, end: end) ?? 0
+    }
+
     /// Whether the active tab's main-view gutter is currently drawn (line numbers on).
     var selfTestMainGutterWidth: CGFloat { tabController.currentTab?.mainView.gutterWidth ?? 0 }
 

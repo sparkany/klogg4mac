@@ -230,6 +230,13 @@ final class LogScrollView: NSScrollView {
     /// Headless "Save to file": write the entire view to `url`. Returns true on success.
     func saveAllToFileForTest(to url: URL) -> Bool { docView.saveAllToFileForTest(to: url) }
 
+    /// Headless two-step range selection (klogg setSelectionStart/End). Returns the
+    /// resulting selected line count.
+    func selectRangeForTest(start: Int, end: Int) -> Int {
+        docView.selfTestSetSelectionRange(start: start, end: end)
+        return docView.selectedLineCountForTest
+    }
+
     /// The effective line-number gutter width: the gutter's computed width when the
     /// line-number preference for this view's mode is ON, otherwise 0 (gutter hidden).
     /// Lets the harness assert the gutter shows/hides as the preference toggles.
@@ -629,6 +636,12 @@ final class LogDocumentView: NSView {
     /// 0-based extent (caret) of the current selection; nil when nothing selected.
     /// QuickFind reads this to start its incremental find from the current position.
     var currentSelectedLine: Int? { selection.state.extentLine }
+
+    /// Number of lines currently selected (headless assertions on range selection).
+    var selectedLineCountForTest: Int {
+        guard let r = selection.state.normalizedRange else { return 0 }
+        return r.upperBound - r.lowerBound + 1
+    }
 
     /// First line visible in the enclosing scroll view's viewport (0 if no content).
     var firstVisibleLine: Int {
@@ -1301,6 +1314,33 @@ final class LogDocumentView: NSView {
     }
     @objc private func ctxClearSearchLimits(_ sender: Any?) { contextActions?.clearSearchLimits?() }
 
+    /// Two-step line-range selection (klogg setSelectionStart / setSelectionEnd):
+    /// "Set selection start" remembers the clicked line; a later "Set selection end"
+    /// selects the whole range from start to the (new) clicked line. Lets the user
+    /// select a large span without dragging.
+    private var rangeSelectionStartRow: Int?
+
+    @objc private func ctxSetSelectionStart(_ sender: Any?) {
+        rangeSelectionStartRow = selection.state.extentLine
+    }
+
+    @objc private func ctxSetSelectionEnd(_ sender: Any?) {
+        guard let start = rangeSelectionStartRow,
+              let end = selection.state.extentLine else { return }
+        selection.setAnchor(line: start)
+        selection.extendTo(line: end)
+        rangeSelectionStartRow = nil
+        needsDisplay = true
+    }
+
+    /// Headless hook for the selection-range round-trip.
+    func selfTestSetSelectionRange(start: Int, end: Int) {
+        selection.setAnchor(line: start)
+        rangeSelectionStartRow = start
+        selection.setAnchor(line: end)   // simulate clicking the end line
+        ctxSetSelectionEnd(nil)
+    }
+
     /// Save the current selection to a file via an NSSavePanel (klogg "Save selected
     /// to file"). Headless-safe: only runs when a window is present.
     private func saveSelectionToFile() {
@@ -1478,6 +1518,19 @@ final class LogDocumentView: NSView {
                 it.target = self; menu.addItem(it)
             }
         }
+
+        // Two-step line-range selection (klogg setSelectionStart / setSelectionEnd).
+        menu.addItem(.separator())
+        let hasLineForSel = selection.state.extentLine != nil
+        let selStart = NSMenuItem(title: "Set selection start",
+                                  action: #selector(ctxSetSelectionStart(_:)), keyEquivalent: "")
+        selStart.target = self; selStart.isEnabled = hasLineForSel
+        menu.addItem(selStart)
+        let selEnd = NSMenuItem(title: "Set selection end",
+                                action: #selector(ctxSetSelectionEnd(_:)), keyEquivalent: "")
+        selEnd.target = self
+        selEnd.isEnabled = (rangeSelectionStartRow != nil) && hasLineForSel
+        menu.addItem(selEnd)
 
         menu.addItem(.separator())
         let selectAllItem = NSMenuItem(title: "Select All",
