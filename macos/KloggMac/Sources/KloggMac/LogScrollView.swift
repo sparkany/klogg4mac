@@ -104,6 +104,12 @@ final class LogScrollView: NSScrollView {
     /// Run the copy-with-line-numbers action programmatically (headless tests).
     func copyWithLineNumbersForTest() { docView.copyWithLineNumbers(nil) }
 
+    /// Drive mark navigation and return the resulting current line (headless tests).
+    func jumpToMarkForTest(next: Bool) -> Int {
+        docView.jumpToMarkForTest_(next: next)
+        return docView.currentSelectedLine ?? -1
+    }
+
     init(engine: KloggEngine, mode: LogViewMode = .main) {
         docView = LogDocumentView(engine: engine, mode: mode)
         gutter  = LogLineNumberGutter(font: docView.logFont, rowHeight: docView.rowHeight)
@@ -1016,8 +1022,40 @@ final class LogDocumentView: NSView {
         case 36, 76: // Return / Enter — keep selection, do nothing extra
             break
         default:
-            super.keyDown(with: event)
+            // klogg log-view mark shortcuts: 'm' mark, ']' next mark, '[' prev mark.
+            switch event.charactersIgnoringModifiers {
+            case "m":
+                markSelectedLines()
+            case "]":
+                jumpToMark(next: true)
+            case "[":
+                jumpToMark(next: false)
+            default:
+                super.keyDown(with: event)
+            }
         }
+    }
+
+    /// Headless wrapper for mark navigation.
+    func jumpToMarkForTest_(next: Bool) { jumpToMark(next: next) }
+
+    /// Jump to the next/previous marked SOURCE line (klogg LogViewNextMark/PrevMark),
+    /// wrapping at the ends. No-op if there are no marks.
+    private func jumpToMark(next: Bool) {
+        guard let store = marksStore else { return }
+        let here = sourceLine(forRow: selection.state.extentLine ?? firstVisibleLine)
+        guard let targetSource = next ? store.nextMark(after: here)
+                                      : store.previousMark(before: here) else { return }
+        // Map the source line back to a row in THIS view's coordinate space.
+        let targetRow: Int
+        switch mode {
+        case .main:
+            targetRow = targetSource
+        case .filtered:
+            // Find the match row whose source line equals targetSource (best-effort).
+            targetRow = (0..<currentLineCount).first { sourceLine(forRow: $0) == targetSource } ?? targetSource
+        }
+        selectAndScrollToLine(targetRow)
     }
 
     /// Scroll so that `line` is visible.

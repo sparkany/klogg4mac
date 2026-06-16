@@ -477,6 +477,15 @@ enum SelfTest {
             ? "PASS marks persisted across store reload: \(reopened.marks.sorted())\n"
             : "FAIL marks persistence: \(reopened.marks.sorted()) (expected [2,8,15])\n"
 
+        // Mark-navigation via the view (']' next / '[' prev), starting from line 0.
+        _ = wc.selfTestContextMenuTitles(selectingLine: 0)   // selects line 0
+        let jNext1 = wc.selfTestJumpToMark(next: true)   // 0 → 2
+        let jNext2 = wc.selfTestJumpToMark(next: true)   // 2 → 8
+        let jPrev = wc.selfTestJumpToMark(next: false)   // 8 → 2
+        s += (jNext1 == 2 && jNext2 == 8 && jPrev == 2)
+            ? "PASS view mark navigation ']'/'[': 0→2→8, prev→2\n"
+            : "FAIL view mark navigation: next1=\(jNext1) next2=\(jNext2) prev=\(jPrev)\n"
+
         // Snapshot the marked main view (marks drawn in the gutter).
         let dir = ProcessInfo.processInfo.environment["KLOGG_SNAPSHOT_DIR"] ?? NSTemporaryDirectory()
         let snap = (dir as NSString).appendingPathComponent("klogg-snapshot-marks.png")

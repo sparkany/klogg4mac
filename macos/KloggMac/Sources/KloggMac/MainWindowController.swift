@@ -870,6 +870,11 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     /// Clear all marks in the active tab.
     func selfTestClearMarks() { tabController.currentTab?.marksStore.clearAll() }
 
+    /// Drive the main view's ']' / '[' mark navigation; returns the landed line or -1.
+    func selfTestJumpToMark(next: Bool) -> Int {
+        tabController.currentTab?.mainView.jumpToMarkForTest(next: next) ?? -1
+    }
+
     /// Build the main view's context menu (selecting `line` first) and return the
     /// titles of its (non-separator) items, so the harness can assert klogg parity.
     func selfTestContextMenuTitles(selectingLine line: Int) -> [String] {
