@@ -68,6 +68,15 @@ final class ScratchpadWindowController: NSWindowController {
         if win.isVisible { win.orderOut(nil) } else { win.makeKeyAndOrderFront(nil) }
     }
 
+    /// Ensure the window is loaded (so appendText/replaceText have a textView) and
+    /// bring it to front — but only in a normal (non-headless) run, so --selftest
+    /// never orders a window on screen. klogg shows the scratchpad on "send to".
+    func showIfNeeded() {
+        _ = window   // forces windowDidLoad → buildUI, populating textView
+        guard NSApp.activationPolicy() == .regular, let win = window, !win.isVisible else { return }
+        win.makeKeyAndOrderFront(nil)
+    }
+
     /// Append text from log view selection (mirrors klogg's ScratchPad::addData).
     func appendText(_ text: String) {
         guard !text.isEmpty else { return }

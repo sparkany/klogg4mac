@@ -24,6 +24,7 @@ enum SelfTest {
         out += "\n" + encodingTests(wc)
         out += "\n" + sessionTests()
         out += "\n" + colorLabelTests(wc)
+        out += "\n" + marksAndContextMenuTests(wc)
         out += "\n" + predefinedFilterTests(wc)
         out += "\n" + overviewTests(wc)
         out += "\n" + textWrapTests(wc)
@@ -425,6 +426,76 @@ enum SelfTest {
         s += (wc.selfTestColorLabelCount == 0 && !stillColours)
             ? "PASS clear removes the label (highlighter no longer colours it)\n"
             : "FAIL clear (count=\(wc.selfTestColorLabelCount) stillColours=\(stillColours))\n"
+
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Line marks + log-view context menu (Wave 10)
+
+    /// Prove (a) line marks toggle + persist + navigate (klogg bookmarks), and (b) the
+    /// log-view right-click context menu mirrors klogg's abstractlogview popup (Mark,
+    /// Copy this line, Copy with line numbers, Replace/Add/Exclude search, Save), and
+    /// (c) "Copy with line numbers" produces "<num>\t<text>". Snapshots the marked view.
+    private static func marksAndContextMenuTests(_ wc: MainWindowController) -> String {
+        var s = "--- MARKS + CONTEXT MENU TESTS ---\n"
+
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-marks-\(UUID().uuidString).log")
+        let body = (1...20).map { "log entry \($0)" }.joined(separator: "\n") + "\n"
+        guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write marks test file\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        wc.selfTestOpen(path)
+        wait(timeout: 5.0) { wc.selfTestCurrentLineCount >= 20 }
+
+        // (a) Mark toggle round-trip on line 3.
+        let on = wc.selfTestToggleMark(line: 3)
+        let countAfterMark = wc.selfTestMarkCount
+        let off = wc.selfTestToggleMark(line: 3)
+        s += (on && !off && countAfterMark == 1)
+            ? "PASS mark toggle round-trip on line 3 (count went 1 → 0)\n"
+            : "FAIL mark toggle: on=\(on) off=\(off) count=\(countAfterMark)\n"
+
+        // Mark three lines; assert count + next-mark wraps.
+        _ = wc.selfTestToggleMark(line: 2)
+        _ = wc.selfTestToggleMark(line: 8)
+        _ = wc.selfTestToggleMark(line: 15)
+        let nextFrom8 = wc.selfTestNextMark(after: 8)     // → 15
+        let nextFrom15 = wc.selfTestNextMark(after: 15)   // wraps → 2
+        s += (wc.selfTestMarkCount == 3 && nextFrom8 == 15 && nextFrom15 == 2)
+            ? "PASS mark navigation: count=3, next(8)=15, next(15) wraps → 2\n"
+            : "FAIL mark navigation: count=\(wc.selfTestMarkCount) next8=\(nextFrom8) next15=\(nextFrom15)\n"
+
+        // Persistence: a fresh MarksStore for the same path sees the marks.
+        let reopened = MarksStore(filePath: path)
+        s += (reopened.marks == [2, 8, 15])
+            ? "PASS marks persisted across store reload: \(reopened.marks.sorted())\n"
+            : "FAIL marks persistence: \(reopened.marks.sorted()) (expected [2,8,15])\n"
+
+        // Snapshot the marked main view (marks drawn in the gutter).
+        let dir = ProcessInfo.processInfo.environment["KLOGG_SNAPSHOT_DIR"] ?? NSTemporaryDirectory()
+        let snap = (dir as NSString).appendingPathComponent("klogg-snapshot-marks.png")
+        s += wc.selfTestSnapshot(to: snap) ? "PASS wrote \(snap)\n" : "FAIL marks snapshot\n"
+        wc.selfTestClearMarks()
+
+        // (b) Context menu mirrors klogg's abstractlogview popup.
+        let titles = wc.selfTestContextMenuTitles(selectingLine: 0)
+        let required = ["Mark", "Copy this line", "Copy this line with line number",
+                        "Replace search", "Add to search", "Exclude from search",
+                        "Select All", "Save selected to file"]
+        let missing = required.filter { !titles.contains($0) }
+        s += missing.isEmpty
+            ? "PASS context menu has klogg items: \(titles.count) entries\n"
+            : "FAIL context menu missing \(missing) — has \(titles)\n"
+
+        // (c) Copy with line numbers → "1\tlog entry 1" for line 0.
+        let copied = wc.selfTestCopyWithLineNumbers(line: 0) ?? ""
+        s += (copied == "1\tlog entry 1")
+            ? "PASS copy-with-line-numbers: \"\(copied.replacingOccurrences(of: "\t", with: "\\t"))\"\n"
+            : "FAIL copy-with-line-numbers: \"\(copied.replacingOccurrences(of: "\t", with: "\\t"))\" (expected \"1\\tlog entry 1\")\n"
 
         wc.closeCurrentTab(nil)
         return s

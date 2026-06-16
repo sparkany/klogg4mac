@@ -29,6 +29,14 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     let filteredView: LogScrollView
     private let searchBar = SearchBarView()
 
+    /// Per-file line marks (bookmarks), shared by the main + filtered views (marks are
+    /// keyed by SOURCE line). Persisted per file path; isolated under --selftest.
+    let marksStore: MarksStore
+
+    /// Set by TabController so context-menu "Send to scratchpad" reaches the shared
+    /// scratchpad window. Returns the scratchpad controller (lazily shown).
+    var scratchpadProvider: (() -> ScratchpadWindowController?)?
+
     // Overview minimap (Wave 8): a thin strip to the right of the log split showing
     // the whole file with search-match positions. Width toggles 0/stripWidth.
     private let overview = OverviewView()
@@ -55,8 +63,16 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         self.engine = KloggEngine()
         self.mainView     = LogScrollView(engine: engine, mode: .main)
         self.filteredView = LogScrollView(engine: engine, mode: .filtered)
+        self.marksStore   = MarksStore(filePath: filePath)
         super.init(nibName: nil, bundle: nil)
         engine.delegate = self
+
+        // Both views draw + toggle the same per-file marks (by source line).
+        mainView.marksStore = marksStore
+        filteredView.marksStore = marksStore
+        // Repaint both views when marks change (e.g. toggled from the other view).
+        NotificationCenter.default.addObserver(self, selector: #selector(marksChanged),
+                                               name: .marksDidChange, object: marksStore)
 
         // Live updates: when highlighter rules or preferences change, both log
         // views must rebuild compiled rules / re-resolve font / repaint.
@@ -76,6 +92,65 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     @objc private func highlightersChanged() {
         mainView.applyHighlighters()
         filteredView.applyHighlighters()
+    }
+
+    @objc private func marksChanged() {
+        mainView.refresh()
+        filteredView.refresh()
+    }
+
+    /// Build the context-menu action set both views share (search + scratchpad).
+    /// Search combination mirrors klogg's replace/add/exclude semantics, expressed as
+    /// regex against our engine (replace=literal; add=alternation; exclude=lookahead).
+    private func makeContextActions() -> LogViewContextActions {
+        var actions = LogViewContextActions()
+        actions.replaceSearch = { [weak self] text in
+            guard let self = self, !text.isEmpty else { return }
+            // Replace: search for the literal selection (plain, not regex).
+            self.searchBar.setSearchAndRun(pattern: text, isRegex: false,
+                                           caseInsensitive: AppPreferences.shared.searchIgnoreCase)
+        }
+        actions.addToSearch = { [weak self] text in
+            guard let self = self, !text.isEmpty else { return }
+            // Add: OR the new term with the existing pattern (regex alternation).
+            let current = self.searchBar.currentPattern
+            let newEsc = NSRegularExpression.escapedPattern(for: text)
+            let combined: String
+            if current.isEmpty {
+                combined = newEsc
+            } else {
+                let curExpr = self.searchBar.isRegexMode
+                    ? current : NSRegularExpression.escapedPattern(for: current)
+                combined = "(\(curExpr))|(\(newEsc))"
+            }
+            self.searchBar.setSearchAndRun(pattern: combined, isRegex: true,
+                                           caseInsensitive: AppPreferences.shared.searchIgnoreCase)
+        }
+        actions.excludeFromSearch = { [weak self] text in
+            guard let self = self, !text.isEmpty else { return }
+            // Exclude: require the current pattern AND not the new term (lookahead).
+            let current = self.searchBar.currentPattern
+            let newEsc = NSRegularExpression.escapedPattern(for: text)
+            let pattern: String
+            if current.isEmpty {
+                pattern = "^(?!.*\(newEsc)).*$"
+            } else {
+                let curExpr = self.searchBar.isRegexMode
+                    ? current : NSRegularExpression.escapedPattern(for: current)
+                pattern = "^(?=.*(?:\(curExpr)))(?!.*\(newEsc)).*$"
+            }
+            self.searchBar.setSearchAndRun(pattern: pattern, isRegex: true,
+                                           caseInsensitive: AppPreferences.shared.searchIgnoreCase)
+        }
+        actions.sendToScratchpad = { [weak self] text in
+            guard let self = self, !text.isEmpty else { return }
+            self.scratchpadProvider?()?.appendText(text)
+        }
+        actions.replaceScratchpad = { [weak self] text in
+            guard let self = self, !text.isEmpty else { return }
+            self.scratchpadProvider?()?.replaceText(text)
+        }
+        return actions
     }
 
     @objc private func preferencesChanged() {
@@ -184,6 +259,11 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
             guard sourceLine != UInt.max else { return }
             self.mainView.scrollToLine(Int(sourceLine))
         }
+
+        // Wire the klogg-style log-view context menu (search/scratchpad) on both views.
+        let actions = makeContextActions()
+        mainView.contextActions = actions
+        filteredView.contextActions = actions
     }
 
     // MARK: - Overview minimap (Wave 8)
@@ -438,6 +518,10 @@ final class TabController: NSViewController {
     weak var statusBar: StatusBarView?
     var onTabChanged: ((CrawlerTab?) -> Void)?
 
+    /// Supplies the shared scratchpad window controller for the log-view context menu's
+    /// "Send to scratchpad" / "Replace scratchpad" actions. Set by MainWindowController.
+    var scratchpadProvider: (() -> ScratchpadWindowController?)?
+
     var currentTab: CrawlerTab? {
         guard let item = tabView.selectedTabViewItem else { return nil }
         let idx = tabView.indexOfTabViewItem(item)
@@ -592,6 +676,7 @@ final class TabController: NSViewController {
         }
 
         let tab = CrawlerTab(filePath: path)
+        tab.scratchpadProvider = { [weak self] in self?.scratchpadProvider?() }
         tab.onLoadingProgress = { [weak self] t, pct in
             guard self?.currentTab === t else { return }
             self?.statusBar?.showProgress(pct)

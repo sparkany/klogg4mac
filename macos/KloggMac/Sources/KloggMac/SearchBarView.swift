@@ -223,6 +223,24 @@ final class SearchBarView: NSView {
 
     // MARK: - Public API (called by CrawlerTab delegate methods)
 
+    /// The text currently in the search field (for add/exclude combination).
+    var currentPattern: String { searchField.stringValue }
+
+    /// Whether regex mode is currently on.
+    var isRegexMode: Bool { isRegex }
+
+    /// Set the field to `pattern` (with explicit regex/case flags) and run the search.
+    /// Used by the log-view context menu's Replace/Add/Exclude-search actions.
+    func setSearchAndRun(pattern: String, isRegex: Bool, caseInsensitive: Bool) {
+        searchField.stringValue = pattern
+        self.isRegex = isRegex
+        self.isCaseInsensitive = caseInsensitive
+        regexButton.state = isRegex ? .on : .off
+        caseButton.state = caseInsensitive ? .on : .off
+        guard !pattern.isEmpty else { return }
+        onSearch?(pattern, caseInsensitive, isRegex)
+    }
+
     /// Move keyboard focus to the search text field.
     func focusSearchField() {
         window?.makeFirstResponder(searchField)

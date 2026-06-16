@@ -82,6 +82,12 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     }
 
     private func wireTabController() {
+        // The log-view context menu's "Send to scratchpad" reaches the shared window.
+        tabController.scratchpadProvider = { [weak self] in
+            guard let self = self else { return nil }
+            self.scratchpadWC.showIfNeeded()
+            return self.scratchpadWC
+        }
         tabController.onTabChanged = { [weak self] tab in
             guard let self = self else { return }
             let title: String
@@ -837,6 +843,48 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         tabController.currentTab?.mainView.applyViewPreferences()
         tabController.currentTab?.filteredView.applyFontPreference()
         tabController.currentTab?.filteredView.applyViewPreferences()
+    }
+
+    // --- Line marks / context menu (headless) ---
+
+    /// Toggle a mark on a source line in the active tab; returns whether it's marked after.
+    func selfTestToggleMark(line: Int) -> Bool {
+        guard let store = tabController.currentTab?.marksStore else { return false }
+        store.toggle(lines: [line])
+        return store.isMarked(line)
+    }
+
+    /// Whether `line` is currently marked in the active tab.
+    func selfTestIsMarked(line: Int) -> Bool {
+        tabController.currentTab?.marksStore.isMarked(line) ?? false
+    }
+
+    /// Number of marks in the active tab.
+    var selfTestMarkCount: Int { tabController.currentTab?.marksStore.marks.count ?? 0 }
+
+    /// Next-mark navigation (wraps), or -1 if no marks.
+    func selfTestNextMark(after line: Int) -> Int {
+        tabController.currentTab?.marksStore.nextMark(after: line) ?? -1
+    }
+
+    /// Clear all marks in the active tab.
+    func selfTestClearMarks() { tabController.currentTab?.marksStore.clearAll() }
+
+    /// Build the main view's context menu (selecting `line` first) and return the
+    /// titles of its (non-separator) items, so the harness can assert klogg parity.
+    func selfTestContextMenuTitles(selectingLine line: Int) -> [String] {
+        guard let view = tabController.currentTab?.mainView else { return [] }
+        view.selectLine(line)
+        return view.contextMenuItemTitles()
+    }
+
+    /// Select a line then copy-with-line-numbers; return the pasteboard string.
+    func selfTestCopyWithLineNumbers(line: Int) -> String? {
+        guard let view = tabController.currentTab?.mainView else { return nil }
+        view.selectLine(line)
+        NSPasteboard.general.clearContents()
+        view.copyWithLineNumbersForTest()
+        return NSPasteboard.general.string(forType: .string)
     }
 
     // --- Search / QuickFind correctness (headless) ---

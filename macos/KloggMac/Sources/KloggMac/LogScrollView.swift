@@ -34,6 +34,24 @@ enum LogViewMode {
     case filtered   // reads engine.filteredLines(in:expandTabs:) and engine.searchMatchCount
 }
 
+/// Callbacks the log view's right-click context menu invokes, mirroring the actions
+/// in klogg's abstractlogview popup (replace/add/exclude search, scratchpad, save to
+/// file). The owning CrawlerTab supplies these; nil entries simply omit the item.
+/// `selectedText` is the current selection's text (first line, trimmed) and the
+/// selection's source-line range is available via the view's selectedSourceLines.
+struct LogViewContextActions {
+    /// Replace the current search with the selected text (klogg "Replace search").
+    var replaceSearch: ((_ text: String) -> Void)?
+    /// OR the selection into the current search (klogg "Add to search").
+    var addToSearch: ((_ text: String) -> Void)?
+    /// Exclude the selection from search (klogg "Exclude from search").
+    var excludeFromSearch: ((_ text: String) -> Void)?
+    /// Send the selection to the scratchpad (append).
+    var sendToScratchpad: ((_ text: String) -> Void)?
+    /// Replace the scratchpad with the selection.
+    var replaceScratchpad: ((_ text: String) -> Void)?
+}
+
 /// Drop-in replacement for NSScrollView that hosts the log document view,
 /// the floating line-number gutter, and wires engine callbacks.
 final class LogScrollView: NSScrollView {
@@ -49,6 +67,42 @@ final class LogScrollView: NSScrollView {
     var onLineSelected: ((Int) -> Void)? {
         didSet { docView.onLineSelected = onLineSelected }
     }
+
+    /// Context-menu / mark actions, bubbled to the owning CrawlerTab so it can drive
+    /// search, scratchpad, and marks. Mirrors klogg's abstractlogview popup menu.
+    var contextActions: LogViewContextActions? {
+        get { docView.contextActions }
+        set { docView.contextActions = newValue }
+    }
+
+    /// The marks store backing this view's gutter mark indicators. Both the main and
+    /// filtered views of a tab share one store (marks are by SOURCE line).
+    var marksStore: MarksStore? {
+        get { docView.marksStore }
+        set { docView.marksStore = newValue; docView.needsDisplay = true }
+    }
+
+    /// Map a row in THIS view's coordinate space to the original source-line index.
+    /// In .main mode the row IS the source line; in .filtered mode it's the match's
+    /// source line. Used so marks (identified by source line) work in both views.
+    func sourceLine(forRow row: Int) -> Int { docView.sourceLine(forRow: row) }
+
+    /// Toggle marks on the current selection (the &Mark / Unmark action).
+    func markSelectedLines() { docView.markSelectedLines() }
+
+    /// 0-based source lines currently selected (for the mark/copy-with-numbers paths).
+    var selectedSourceLines: [Int] { docView.selectedSourceLines }
+
+    /// Repaint (e.g. after marks change elsewhere).
+    func refresh() { docView.needsDisplay = true }
+
+    /// Titles of the current context menu's non-separator items (headless assertions).
+    func contextMenuItemTitles() -> [String] {
+        docView.buildContextMenu().items.filter { !$0.isSeparatorItem }.map { $0.title }
+    }
+
+    /// Run the copy-with-line-numbers action programmatically (headless tests).
+    func copyWithLineNumbersForTest() { docView.copyWithLineNumbers(nil) }
 
     init(engine: KloggEngine, mode: LogViewMode = .main) {
         docView = LogDocumentView(engine: engine, mode: mode)
@@ -394,6 +448,46 @@ final class LogDocumentView: NSView {
 
     /// Fires when the user clicks a row. Set by LogScrollView.
     var onLineSelected: ((Int) -> Void)?
+
+    /// Context-menu action callbacks (search / scratchpad). Set by LogScrollView.
+    var contextActions: LogViewContextActions?
+
+    /// Marks store backing the gutter mark indicators. Set by LogScrollView.
+    var marksStore: MarksStore?
+
+    /// Width of the mark-indicator zone painted at the left edge of the gutter when a
+    /// marks store is present. Mirrors klogg's bullet/arrow zone (abstractlogview).
+    private let markZoneWidth: CGFloat = 11
+
+    /// Source (original file) line for a row in this view's coordinate space.
+    /// .main: identity. .filtered: the match's source line (falls back to row).
+    func sourceLine(forRow row: Int) -> Int {
+        switch mode {
+        case .main:
+            return row
+        case .filtered:
+            let src = engine.searchMatchLine(at: UInt(row))
+            return src == UInt.max ? row : Int(src)
+        }
+    }
+
+    /// 0-based SOURCE lines covered by the current selection.
+    var selectedSourceLines: [Int] {
+        guard let range = selection.state.normalizedRange else { return [] }
+        let lo = max(0, range.lowerBound)
+        let hi = min(currentLineCount - 1, range.upperBound)
+        guard lo <= hi else { return [] }
+        return (lo...hi).map { sourceLine(forRow: $0) }
+    }
+
+    /// Toggle marks on the selected lines (klogg &Mark / Unmark).
+    func markSelectedLines() {
+        guard let store = marksStore else { return }
+        let lines = selectedSourceLines
+        guard !lines.isEmpty else { return }
+        store.toggle(lines: lines)
+        needsDisplay = true
+    }
 
     /// 0-based extent (caret) of the current selection; nil when nothing selected.
     /// QuickFind reads this to start its incremental find from the current position.
@@ -803,7 +897,30 @@ final class LogDocumentView: NSView {
             let x = scrollX + gutterWidth - innerPad - size.width
             let y = CGFloat(row) * rowHeight + (rowHeight - size.height) / 2
             label.draw(at: NSPoint(x: x, y: y), withAttributes: attrs)
+
+            // Mark indicator (klogg's bullet/arrow): a filled arrow at the gutter's
+            // left edge for marked source lines.
+            if let store = marksStore, store.isMarked(sourceLine(forRow: row)) {
+                drawMarkArrow(atX: scrollX, rowTop: CGFloat(row) * rowHeight)
+            }
         }
+    }
+
+    /// Draw a small filled rightward arrow (klogg's mark glyph) in the mark zone.
+    private func drawMarkArrow(atX x: CGFloat, rowTop: CGFloat) {
+        let midY = rowTop + rowHeight / 2
+        let zoneW = markZoneWidth
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: x + 2, y: midY - 3))
+        path.line(to: NSPoint(x: x + zoneW / 2, y: midY - 3))
+        path.line(to: NSPoint(x: x + zoneW / 2, y: midY - 5))
+        path.line(to: NSPoint(x: x + zoneW - 1, y: midY))
+        path.line(to: NSPoint(x: x + zoneW / 2, y: midY + 5))
+        path.line(to: NSPoint(x: x + zoneW / 2, y: midY + 3))
+        path.line(to: NSPoint(x: x + 2, y: midY + 3))
+        path.close()
+        NSColor.systemBlue.setFill()
+        path.fill()
     }
 
     // MARK: - Hit testing (coordinate → line number)
@@ -819,6 +936,19 @@ final class LogDocumentView: NSView {
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let line  = lineIndex(for: point)
+
+        // Click in the left mark zone toggles a mark on that line (klogg: clicking the
+        // left bullet margin marks the line). The mark zone is the left edge of the
+        // gutter, frozen at the viewport's left edge.
+        if let store = marksStore, lineNumbersEnabled {
+            let scrollX = enclosingScrollView?.contentView.bounds.origin.x ?? 0
+            if point.x >= scrollX && point.x < scrollX + markZoneWidth {
+                store.toggle(lines: [sourceLine(forRow: line)])
+                needsDisplay = true
+                return
+            }
+        }
+
         if event.modifierFlags.contains(.shift) {
             selection.extendTo(line: line)
         } else {
@@ -948,19 +1078,165 @@ final class LogDocumentView: NSView {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
+    /// Copy the selection with each line prefixed by its (source) line number, as
+    /// klogg's "Copy with line numbers" does. Format: "<num>\t<text>".
+    @IBAction func copyWithLineNumbers(_ sender: Any?) {
+        guard let range = selection.state.normalizedRange else { return }
+        let lo = max(range.lowerBound, 0)
+        let hi = min(range.upperBound, currentLineCount - 1)
+        guard lo <= hi else { return }
+
+        var parts: [String] = []
+        var cursor = lo
+        let chunkSize = 10_000
+        while cursor <= hi {
+            let batchEnd = min(cursor + chunkSize - 1, hi)
+            let nsRange  = NSRange(location: cursor, length: batchEnd - cursor + 1)
+            let fetched: [String]
+            switch mode {
+            case .main:     fetched = engine.lines(in: nsRange, expandTabs: true)
+            case .filtered: fetched = engine.filteredLines(in: nsRange, expandTabs: true)
+            }
+            for (i, txt) in fetched.enumerated() {
+                let num = sourceLine(forRow: cursor + i) + 1
+                parts.append("\(num)\t\(txt)")
+            }
+            cursor = batchEnd + 1
+        }
+        let text = parts.joined(separator: "\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// Trimmed text of the current selection's first line (drives the search/scratchpad
+    /// context actions). Empty string when nothing meaningful is selected.
+    private var selectionText: String { currentSelectionText ?? "" }
+
+    // MARK: - Context-menu action targets (klogg abstractlogview popup)
+
+    @objc private func ctxMark(_ sender: Any?)              { markSelectedLines() }
+    @objc private func ctxReplaceSearch(_ sender: Any?)     { contextActions?.replaceSearch?(selectionText) }
+    @objc private func ctxAddToSearch(_ sender: Any?)       { contextActions?.addToSearch?(selectionText) }
+    @objc private func ctxExcludeSearch(_ sender: Any?)     { contextActions?.excludeFromSearch?(selectionText) }
+    @objc private func ctxSendScratchpad(_ sender: Any?)    { contextActions?.sendToScratchpad?(selectionText) }
+    @objc private func ctxReplaceScratchpad(_ sender: Any?) { contextActions?.replaceScratchpad?(selectionText) }
+    @objc private func ctxSaveToFile(_ sender: Any?)        { saveSelectionToFile() }
+
+    /// Save the current selection to a file via an NSSavePanel (klogg "Save selected
+    /// to file"). Headless-safe: only runs when a window is present.
+    private func saveSelectionToFile() {
+        guard let range = selection.state.normalizedRange, window != nil else { return }
+        let lo = max(range.lowerBound, 0)
+        let hi = min(range.upperBound, currentLineCount - 1)
+        guard lo <= hi else { return }
+        let nsRange = NSRange(location: lo, length: hi - lo + 1)
+        let lines: [String]
+        switch mode {
+        case .main:     lines = engine.lines(in: nsRange, expandTabs: false)
+        case .filtered: lines = engine.filteredLines(in: nsRange, expandTabs: false)
+        }
+        let text = lines.joined(separator: "\n") + "\n"
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "selection.txt"
+        panel.begin { resp in
+            guard resp == .OK, let url = panel.url else { return }
+            try? text.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+
     // MARK: - Right-click / context menu
 
     override func menu(for event: NSEvent) -> NSMenu? {
+        // If the right-click lands on an unselected line, select it first (klogg
+        // selects the clicked line before showing the popup).
+        let point = convert(event.locationInWindow, from: nil)
+        let line  = lineIndex(for: point)
+        if !selection.state.contains(line: line) {
+            selection.setAnchor(line: line)
+            needsDisplay = true
+        }
+        return buildContextMenu()
+    }
+
+    /// Build the right-click menu mirroring klogg's abstractlogview popup ordering:
+    /// Mark · Copy / Copy with line numbers / scratchpad · Replace/Add/Exclude search ·
+    /// Select All · Save selected to file.
+    func buildContextMenu() -> NSMenu {
         let menu = NSMenu(title: "")
-        let copyItem = NSMenuItem(title: "Copy", action: #selector(copy(_:)),
-                                  keyEquivalent: "c")
+        let isSingle = (selection.state.normalizedRange.map { $0.lowerBound == $0.upperBound }) ?? false
+
+        // Mark / Unmark (text flips when every selected line is already marked).
+        if let store = marksStore {
+            let lines = selectedSourceLines
+            let allMarked = !lines.isEmpty && lines.allSatisfy { store.isMarked($0) }
+            let mark = NSMenuItem(title: allMarked ? "Unmark" : "Mark",
+                                  action: #selector(ctxMark(_:)), keyEquivalent: "")
+            mark.target = self
+            mark.isEnabled = !lines.isEmpty
+            menu.addItem(mark)
+            menu.addItem(.separator())
+        }
+
+        // Copy / Copy with line numbers.
+        let copyTitle = isSingle ? "Copy this line" : "Copy"
+        let copyItem = NSMenuItem(title: copyTitle, action: #selector(copy(_:)), keyEquivalent: "c")
         copyItem.keyEquivalentModifierMask = .command
-        let selectAllItem = NSMenuItem(title: "Select All",
-                                       action: #selector(selectAll(_:)),
-                                       keyEquivalent: "a")
-        selectAllItem.keyEquivalentModifierMask = .command
+        copyItem.target = self
         menu.addItem(copyItem)
+
+        let copyNumTitle = isSingle ? "Copy this line with line number" : "Copy with line numbers"
+        let copyNum = NSMenuItem(title: copyNumTitle,
+                                 action: #selector(copyWithLineNumbers(_:)), keyEquivalent: "")
+        copyNum.target = self
+        menu.addItem(copyNum)
+
+        // Scratchpad (only if wired).
+        if contextActions?.sendToScratchpad != nil {
+            let send = NSMenuItem(title: "Send to scratchpad",
+                                  action: #selector(ctxSendScratchpad(_:)), keyEquivalent: "")
+            send.target = self
+            menu.addItem(send)
+        }
+        if contextActions?.replaceScratchpad != nil {
+            let repl = NSMenuItem(title: "Replace scratchpad",
+                                  action: #selector(ctxReplaceScratchpad(_:)), keyEquivalent: "")
+            repl.target = self
+            menu.addItem(repl)
+        }
+
+        // Search actions (klogg: replace / add / exclude). Only meaningful with a
+        // non-empty selection.
+        let hasSel = !selectionText.isEmpty
+        if contextActions?.replaceSearch != nil
+            || contextActions?.addToSearch != nil
+            || contextActions?.excludeFromSearch != nil {
+            menu.addItem(.separator())
+            if contextActions?.replaceSearch != nil {
+                let it = NSMenuItem(title: "Replace search", action: #selector(ctxReplaceSearch(_:)), keyEquivalent: "")
+                it.target = self; it.isEnabled = hasSel; menu.addItem(it)
+            }
+            if contextActions?.addToSearch != nil {
+                let it = NSMenuItem(title: "Add to search", action: #selector(ctxAddToSearch(_:)), keyEquivalent: "")
+                it.target = self; it.isEnabled = hasSel; menu.addItem(it)
+            }
+            if contextActions?.excludeFromSearch != nil {
+                let it = NSMenuItem(title: "Exclude from search", action: #selector(ctxExcludeSearch(_:)), keyEquivalent: "")
+                it.target = self; it.isEnabled = hasSel; menu.addItem(it)
+            }
+        }
+
+        menu.addItem(.separator())
+        let selectAllItem = NSMenuItem(title: "Select All",
+                                       action: #selector(selectAll(_:)), keyEquivalent: "a")
+        selectAllItem.keyEquivalentModifierMask = .command
+        selectAllItem.target = self
         menu.addItem(selectAllItem)
+
+        let save = NSMenuItem(title: "Save selected to file",
+                              action: #selector(ctxSaveToFile(_:)), keyEquivalent: "")
+        save.target = self
+        menu.addItem(save)
+
         return menu
     }
 }
