@@ -61,14 +61,30 @@ final class SearchBarView: NSView {
 
     @objc private func filtersChanged() { reloadFilters() }
 
+    // MARK: - Appearance
+
+    /// Re-resolve the layer background against the current appearance.
+    private func applyChromeBackground() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyChromeBackground()
+    }
+
     // MARK: - Layout
 
     private func buildSubviews() {
         translatesAutoresizingMaskIntoConstraints = false
 
-        // Background matches the toolbar area.
+        // Background matches the toolbar area. (Resolved through the current
+        // appearance and refreshed on theme change — a frozen .cgColor would stay
+        // dark after the user switches the system to Light.)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        applyChromeBackground()
 
         // Predefined-filters picker (▾). The first item is a static title; choosing a
         // filter fills the field with its pattern + flags and runs the search.

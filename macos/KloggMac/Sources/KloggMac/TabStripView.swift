@@ -28,7 +28,7 @@ final class TabStripView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        applyStripBackground()
 
         stack.orientation = .horizontal
         stack.alignment = .centerY
@@ -48,6 +48,17 @@ final class TabStripView: NSView {
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: NSView.noIntrinsicMetric, height: TabStripView.stripHeight)
+    }
+
+    private func applyStripBackground() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyStripBackground()
     }
 
     /// Rebuild the strip from the current titles + selected index.
@@ -78,17 +89,17 @@ private final class TabItemView: NSView {
     var onClose: ((Int) -> Void)?
 
     private let index: Int
+    private let isSelected: Bool
     private let label = NSTextField(labelWithString: "")
     private let closeButton = NSButton()
 
     init(index: Int, title: String, selected: Bool) {
         self.index = index
+        self.isSelected = selected
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 5
-        layer?.backgroundColor = (selected
-            ? NSColor.selectedControlColor
-            : NSColor.controlBackgroundColor).cgColor
+        applyPillBackground()
 
         label.stringValue = title
         label.lineBreakMode = .byTruncatingMiddle
@@ -129,6 +140,21 @@ private final class TabItemView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    /// Re-resolve the pill background for the current appearance (frozen .cgColor
+    /// would not follow a Light/Dark switch).
+    private func applyPillBackground() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = (isSelected
+                ? NSColor.selectedControlColor
+                : NSColor.controlBackgroundColor).cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyPillBackground()
+    }
 
     @objc private func closeClicked() {
         onClose?(index)

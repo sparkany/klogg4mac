@@ -25,6 +25,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppDefaults.useIsolatedSuite()
         }
 
+        // QA aid: force Light/Dark for headless appearance snapshots.
+        switch ProcessInfo.processInfo.environment["KLOGG_FORCE_APPEARANCE"] {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark":  NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: break
+        }
+
         // Install the full klogg menu bar (Wave 2).
         AppMenu.install()
 

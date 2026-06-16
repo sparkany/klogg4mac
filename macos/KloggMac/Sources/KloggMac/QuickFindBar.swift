@@ -50,10 +50,23 @@ final class QuickFindBar: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyChromeBackground()
+    }
+
+    /// Re-resolve the layer background against the current appearance (a frozen
+    /// .cgColor would stay dark when the system switches to Light).
+    private func applyChromeBackground() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        }
+    }
+
     private func build() {
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        applyChromeBackground()
 
         prevButton.translatesAutoresizingMaskIntoConstraints = false
         prevButton.title = "‹"
