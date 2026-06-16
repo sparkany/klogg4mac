@@ -887,6 +887,16 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         return NSPasteboard.general.string(forType: .string)
     }
 
+    // --- Status bar / info-line format (headless) ---
+
+    /// Render klogg's line-position field for given inputs (Ln:N/Total ...).
+    func selfTestStatusLineField(line: Int, total: Int, column: Int?, selSymbols: Int, selLines: Int) -> String {
+        let sb = StatusBarView(frame: .zero)
+        sb.update(filePath: "/x", lineCount: total, fileSize: 0, encoding: "UTF-8")
+        sb.updatePosition(line: line, column: column, selSymbols: selSymbols, selLines: selLines)
+        return sb.selfTestLineFieldText
+    }
+
     // --- Search / QuickFind correctness (headless) ---
 
     /// Count matches for `pattern` by scanning the engine line-by-line with the same

@@ -25,6 +25,8 @@ enum SelfTest {
         out += "\n" + sessionTests()
         out += "\n" + colorLabelTests(wc)
         out += "\n" + marksAndContextMenuTests(wc)
+        out += "\n" + searchHistoryTests()
+        out += "\n" + infoLineFormatTests(wc)
         out += "\n" + predefinedFilterTests(wc)
         out += "\n" + overviewTests(wc)
         out += "\n" + textWrapTests(wc)
@@ -498,6 +500,69 @@ enum SelfTest {
             : "FAIL copy-with-line-numbers: \"\(copied.replacingOccurrences(of: "\t", with: "\\t"))\" (expected \"1\\tlog entry 1\")\n"
 
         wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Search history (klogg savedSearches) (Wave 10)
+
+    /// Prove the recent-search store mirrors klogg's SavedSearches::addRecent:
+    /// skip blanks, de-dupe (move to front), most-recent-first ordering, and clear.
+    private static func searchHistoryTests() -> String {
+        var s = "--- SEARCH HISTORY TESTS ---\n"
+        let store = SavedSearchesStore.shared
+        let baseline = store.recentSearches()
+        defer { store.clear(); baseline.reversed().forEach { store.addRecent($0) } }
+
+        store.clear()
+        store.addRecent("first")
+        store.addRecent("second")
+        store.addRecent("")          // blank ignored
+        store.addRecent("third")
+        // Most-recent-first.
+        s += (store.recentSearches() == ["third", "second", "first"])
+            ? "PASS recent searches most-recent-first: \(store.recentSearches())\n"
+            : "FAIL recent order: \(store.recentSearches())\n"
+
+        // Re-adding an existing term moves it to the front (de-dupe).
+        store.addRecent("first")
+        s += (store.recentSearches() == ["first", "third", "second"])
+            ? "PASS re-add de-dupes + moves to front: \(store.recentSearches())\n"
+            : "FAIL de-dupe: \(store.recentSearches())\n"
+
+        // Blank was skipped (count stays 3).
+        s += (store.recentSearches().count == 3)
+            ? "PASS blank search ignored (count=3)\n"
+            : "FAIL blank not ignored (count=\(store.recentSearches().count))\n"
+
+        store.clear()
+        s += store.recentSearches().isEmpty ? "PASS clear history\n" : "FAIL clear history\n"
+        return s
+    }
+
+    // MARK: - Info-line format parity (klogg lineNumberHandler) (Wave 10)
+
+    /// Prove the status bar's line-position field matches klogg's exact formats:
+    /// "Ln:N/Total", "Ln:N/Total Col:C Sel:S|L" (single-line portion), and
+    /// "Ln:N/Total Sel:S|L" (multi-line selection).
+    private static func infoLineFormatTests(_ wc: MainWindowController) -> String {
+        var s = "--- INFO-LINE FORMAT TESTS ---\n"
+
+        func check(_ label: String, _ got: String, _ want: String) {
+            s += (got == want) ? "PASS \(label): \"\(got)\"\n"
+                               : "FAIL \(label): \"\(got)\" (expected \"\(want)\")\n"
+        }
+        // No selection: Ln:1/100 (line is 0-based input → 1-based display).
+        check("plain position",
+              wc.selfTestStatusLineField(line: 0, total: 100, column: nil, selSymbols: 0, selLines: 1),
+              "Ln:1/100")
+        // Single-line portion: Ln:5/100 Col:3 Sel:7|1.
+        check("single-line portion",
+              wc.selfTestStatusLineField(line: 4, total: 100, column: 3, selSymbols: 7, selLines: 1),
+              "Ln:5/100 Col:3 Sel:7|1")
+        // Multi-line selection: Ln:5/100 Sel:40|3 (no Col).
+        check("multi-line selection",
+              wc.selfTestStatusLineField(line: 4, total: 100, column: 0, selSymbols: 40, selLines: 3),
+              "Ln:5/100 Sel:40|3")
         return s
     }
 

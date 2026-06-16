@@ -53,6 +53,9 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     // Callbacks fired on the main thread.
     var onLoadingFinished: ((CrawlerTab, Bool) -> Void)?
     var onLoadingProgress: ((CrawlerTab, Int) -> Void)?
+    /// Fired when the main view's current line changes (0-based) so the owner can
+    /// update the status bar's "Ln:N/Total" field (klogg lineNumberHandler).
+    var onMainLineChanged: ((Int) -> Void)?
 
     /// Follow (tail -f) mode. When ON the engine watches the file for growth and we
     /// auto-scroll the main view to the tail whenever a re-index finishes.
@@ -264,6 +267,11 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         let actions = makeContextActions()
         mainView.contextActions = actions
         filteredView.contextActions = actions
+
+        // Clicking a line in the main view updates the status bar position field.
+        mainView.onLineSelected = { [weak self] line in
+            self?.onMainLineChanged?(line)
+        }
     }
 
     // MARK: - Overview minimap (Wave 8)
@@ -684,6 +692,10 @@ final class TabController: NSViewController {
         tab.onLoadingFinished = { [weak self] t, success in
             self?.tabLoadingFinished(tab: t, success: success)
         }
+        tab.onMainLineChanged = { [weak self] line in
+            guard self?.currentTab === tab else { return }
+            self?.statusBar?.updatePosition(line: line, column: nil)
+        }
 
         _tabs.append(tab)
 
@@ -788,17 +800,15 @@ final class TabController: NSViewController {
             return
         }
         let lc = Int(tab.engine.lineCount())
-        let sz = fileSizeBytes(for: tab.filePath)
+        let attrs = try? FileManager.default.attributesOfItem(atPath: tab.filePath)
+        let sz = attrs?[.size] as? Int64
+        let modified = attrs?[.modificationDate] as? Date
         statusBar?.update(
             filePath: tab.filePath,
             lineCount: lc,
             fileSize: sz,
-            encoding: "UTF-8")   // encoding detection is Phase 4
-    }
-
-    private func fileSizeBytes(for path: String) -> Int64? {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        return attrs?[.size] as? Int64
+            encoding: "UTF-8",   // encoding detection is Phase 4
+            modified: modified)
     }
 }
 

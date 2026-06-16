@@ -47,7 +47,13 @@ final class SearchBarView: NSView {
         NotificationCenter.default.addObserver(
             self, selector: #selector(filtersChanged),
             name: .predefinedFiltersDidChange, object: nil)
+        // Rebuild the search-history dropdown when the saved-search list changes.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(historyChanged),
+            name: .savedSearchesDidChange, object: nil)
     }
+
+    @objc private func historyChanged() { rebuildHistoryMenu() }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
 
@@ -83,6 +89,10 @@ final class SearchBarView: NSView {
         searchField.target = self
         searchField.action = #selector(searchAction(_:))
         addSubview(searchField)
+
+        // Search-history dropdown (klogg's savedSearches combo). The magnifying-glass
+        // template menu lists recent searches; picking one runs it.
+        rebuildHistoryMenu()
 
         // Case-insensitive toggle button (Aa).
         caseButton.translatesAutoresizingMaskIntoConstraints = false
@@ -175,7 +185,49 @@ final class SearchBarView: NSView {
     @objc private func searchAction(_ sender: NSSearchField) {
         let pattern = sender.stringValue.trimmingCharacters(in: .whitespaces)
         guard !pattern.isEmpty else { return }
+        // Record in the recent-search history (klogg addRecent) before running.
+        SavedSearchesStore.shared.addRecent(pattern)
         onSearch?(pattern, isCaseInsensitive, isRegex)
+    }
+
+    // MARK: - Search history dropdown (klogg savedSearches)
+
+    /// Rebuild the search field's dropdown menu to list recent searches. The first item
+    /// is a non-selectable "Recent searches" header; each recent search runs on click;
+    /// a trailing "Clear history" wipes the store.
+    private func rebuildHistoryMenu() {
+        let menu = NSMenu()
+        let recents = SavedSearchesStore.shared.recentSearches()
+        if recents.isEmpty {
+            let empty = NSMenuItem(title: "No recent searches", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        } else {
+            let header = NSMenuItem(title: "Recent searches", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            for r in recents {
+                let item = NSMenuItem(title: r, action: #selector(selectHistory(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = r
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+            let clear = NSMenuItem(title: "Clear history", action: #selector(clearHistory(_:)), keyEquivalent: "")
+            clear.target = self
+            menu.addItem(clear)
+        }
+        (searchField.cell as? NSSearchFieldCell)?.searchMenuTemplate = menu
+    }
+
+    @objc private func selectHistory(_ sender: NSMenuItem) {
+        guard let text = sender.representedObject as? String else { return }
+        searchField.stringValue = text
+        onSearch?(text, isCaseInsensitive, isRegex)
+    }
+
+    @objc private func clearHistory(_ sender: NSMenuItem) {
+        SavedSearchesStore.shared.clear()
     }
 
     @objc private func toggleCase(_ sender: NSButton) {

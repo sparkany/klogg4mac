@@ -51,6 +51,19 @@ final class StatusBarView: NSView {
         return f
     }()
 
+    /// "modified on <date>" — mirrors klogg's dateField (mainwindow.cpp).
+    private let dateField: NSTextField = {
+        let f = NSTextField(labelWithString: "")
+        f.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        f.translatesAutoresizingMaskIntoConstraints = false
+        f.setContentHuggingPriority(.required, for: .horizontal)
+        return f
+    }()
+
+    /// Total line count of the current file, cached so updatePosition can render
+    /// klogg's "Ln:N/Total" format without re-querying.
+    private var totalLines: Int = 0
+
     // MARK: - Init
 
     override init(frame: NSRect) {
@@ -64,12 +77,16 @@ final class StatusBarView: NSView {
         let separator1 = makeSeparator()
         let separator2 = makeSeparator()
         let separator3 = makeSeparator()
+        let separator4 = makeSeparator()
 
+        // klogg toolbar order (mainwindow.cpp createToolBars): info | size | date |
+        // encoding | line-number.
         let stack = NSStackView(views: [
             pathField, separator1,
             sizeField, separator2,
-            lineField, separator3,
-            encodingField,
+            dateField, separator3,
+            encodingField, separator4,
+            lineField,
         ])
         stack.orientation = .horizontal
         stack.spacing = 6
@@ -94,7 +111,8 @@ final class StatusBarView: NSView {
     // MARK: - Update API
 
     /// Called by TabController when a file finishes loading or the tab changes.
-    func update(filePath: String?, lineCount: Int?, fileSize: Int64?, encoding: String?) {
+    func update(filePath: String?, lineCount: Int?, fileSize: Int64?, encoding: String?,
+                modified: Date? = nil) {
         pathField.stringValue = filePath ?? ""
         pathField.toolTip = filePath
 
@@ -104,8 +122,17 @@ final class StatusBarView: NSView {
             sizeField.stringValue = ""
         }
 
-        if let lc = lineCount {
-            lineField.stringValue = "\(lc) lines"
+        // klogg "modified on <date>" (dateField).
+        if let d = modified {
+            dateField.stringValue = "modified on " + Self.dateFormatter.string(from: d)
+        } else {
+            dateField.stringValue = ""
+        }
+
+        totalLines = lineCount ?? 0
+        // klogg shows Ln:1/Total once the file is loaded (lineNumberHandler).
+        if let lc = lineCount, lc > 0 {
+            lineField.stringValue = "Ln:1/\(lc)"
         } else {
             lineField.stringValue = ""
         }
@@ -113,16 +140,36 @@ final class StatusBarView: NSView {
         encodingField.stringValue = encoding ?? ""
     }
 
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
+
     /// Called by MainWindowController when the user picks an encoding from the menu.
     func updateEncoding(_ name: String) {
         encodingField.stringValue = name
     }
 
-    /// Called by TabController on selection changes (shows current line / column).
-    func updatePosition(line: Int?, column: Int?) {
-        guard let ln = line else { return }
-        let col = column.map { ", col \($0)" } ?? ""
-        lineField.stringValue = "Ln \(ln + 1)\(col)"
+    /// Called by TabController on selection changes. Mirrors klogg's lineNumberHandler
+    /// (mainwindow.cpp): "Ln:N/Total" plain, "Ln:N/Total Col:C Sel:S|L" with a portion
+    /// selection on one line, "Ln:N/Total Sel:S|L" across multiple selected lines.
+    /// - Parameters:
+    ///   - line: 0-based current line.
+    ///   - column: 0-based start column of a portion selection (nil = whole line).
+    ///   - selSymbols: number of selected characters (0 = no portion selection).
+    ///   - selLines: number of selected lines.
+    func updatePosition(line: Int?, column: Int?, selSymbols: Int = 0, selLines: Int = 1) {
+        guard let ln = line, totalLines > 0 else { return }
+        let n = ln + 1
+        if selSymbols == 0 {
+            lineField.stringValue = "Ln:\(n)/\(totalLines)"
+        } else if selLines == 1, let col = column {
+            lineField.stringValue = "Ln:\(n)/\(totalLines) Col:\(col) Sel:\(selSymbols)|\(selLines)"
+        } else {
+            lineField.stringValue = "Ln:\(n)/\(totalLines) Sel:\(selSymbols)|\(selLines)"
+        }
     }
 
     // MARK: - Loading progress
@@ -130,6 +177,9 @@ final class StatusBarView: NSView {
     func showProgress(_ percent: Int) {
         lineField.stringValue = "Loading… \(percent)%"
     }
+
+    /// Current text of the line-position field (headless assertions).
+    var selfTestLineFieldText: String { lineField.stringValue }
 
     // MARK: - Helpers
 
