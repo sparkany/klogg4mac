@@ -1220,13 +1220,16 @@ enum SelfTest {
         // --- (3) BOOLEAN combination (klogg booleanButton_). klogg's parseBooleanExpressions
         // REQUIRES each sub-pattern enclosed in quotes. "ERROR" and not "INFO" → all 250
         // ERROR lines (none also contain INFO).
-        wc.selfTestRunSearchFull(pattern: "\"ERROR\" and not \"INFO\"", caseInsensitive: false,
+        // NOTE klogg/exprtk boolean grammar: `not` is a function and needs parentheses —
+        // `and not("INFO")`, NOT `and not "INFO"`. (The latter mis-evaluates to 0; it's the
+        // same form the context-menu "exclude" builds, which is asserted below.)
+        wc.selfTestRunSearchFull(pattern: "\"ERROR\" and not(\"INFO\")", caseInsensitive: false,
                                  isRegex: false, inverse: false, boolean: true,
                                  startLine: 0, endLine: Int.max)
         let boolAndOK = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 250 }
         s += boolAndOK
-            ? "PASS boolean '\"ERROR\" and not \"INFO\"' = 250\n"
-            : "FAIL boolean '\"ERROR\" and not \"INFO\"' = \(wc.selfTestSearchMatchCount) (expected 250)\n"
+            ? "PASS boolean '\"ERROR\" and not(\"INFO\")' = 250\n"
+            : "FAIL boolean '\"ERROR\" and not(\"INFO\")' = \(wc.selfTestSearchMatchCount) (expected 250)\n"
 
         // "ERROR" or "INFO" → every line (1000), since each is one or the other.
         wc.selfTestRunSearchFull(pattern: "\"ERROR\" or \"INFO\"", caseInsensitive: false,
@@ -1240,7 +1243,7 @@ enum SelfTest {
         // --- (4) VALIDITY gate.
         let goodRegex = wc.selfTestIsValidSearch(pattern: "ERR[0-9]+", isRegex: true, boolean: false)
         let badRegex  = wc.selfTestIsValidSearch(pattern: "ERR[0-9", isRegex: true, boolean: false)
-        let goodBool  = wc.selfTestIsValidSearch(pattern: "\"ERROR\" and not \"INFO\"", isRegex: false, boolean: true)
+        let goodBool  = wc.selfTestIsValidSearch(pattern: "\"ERROR\" and not(\"INFO\")", isRegex: false, boolean: true)
         // klogg rejects boolean patterns without quotes ("Patterns must be enclosed in quotes").
         let badBool   = wc.selfTestIsValidSearch(pattern: "ERROR and not INFO", isRegex: false, boolean: true)
         s += (goodRegex && !badRegex)

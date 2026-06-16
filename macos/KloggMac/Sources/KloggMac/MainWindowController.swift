@@ -757,9 +757,11 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     /// Run a search on the active tab (so the overview has matches to plot), driving
     /// the same engine path as the search bar.
     func selfTestRunSearch(pattern: String, caseInsensitive: Bool, isRegex: Bool) {
+        let seq = selfTestSearchFinishSeq
         tabController.currentTab?.engine.search(withPattern: pattern,
                                                 caseInsensitive: caseInsensitive,
                                                 regex: isRegex)
+        selfTestWaitSearch(from: seq)
     }
 
     // --- Predefined filters in search bar (headless) ---
@@ -768,7 +770,9 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     /// path as a picker selection). The resulting search runs on the engine; tests
     /// pump the runloop then assert on the match count.
     func selfTestApplyPredefinedFilter(_ filter: PredefinedFilter) {
+        let seq = selfTestSearchFinishSeq
         tabController.applyPredefinedFilter(filter)
+        selfTestWaitSearch(from: seq)
     }
 
     /// Match count of the active tab's last search (filtered view line count).
@@ -776,16 +780,34 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         Int(tabController.currentTab?.engine.searchMatchCount() ?? 0)
     }
 
+    /// Monotonic search-completion counter — the harness waits for this to advance
+    /// after issuing a search, then reads the (now-final) match count. Avoids the
+    /// flake where polling the count value matched a previous same-count search.
+    var selfTestSearchFinishSeq: Int { tabController.currentTab?.searchFinishSeq ?? 0 }
+
+    /// Pump the main run loop until the active tab's search COMPLETES (its finish
+    /// counter advances past `from`) or `timeout` elapses. Search is async (results
+    /// arrive via a main-queue callback), so a synchronous test helper must spin the
+    /// loop to receive completion before reading the result.
+    private func selfTestWaitSearch(from seq: Int, timeout: TimeInterval = 8.0) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while (tabController.currentTab?.searchFinishSeq ?? seq) == seq, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+    }
+
     /// Full engine search with inverse/boolean/range — drives the new bridge method
     /// directly (deterministic, independent of the async UI path). `endLine == Int.max`
     /// means "to end of file".
     func selfTestRunSearchFull(pattern: String, caseInsensitive: Bool, isRegex: Bool,
                                inverse: Bool, boolean: Bool, startLine: Int, endLine: Int) {
+        let seq = selfTestSearchFinishSeq
         tabController.currentTab?.engine.search(
             withPattern: pattern, caseInsensitive: caseInsensitive, regex: isRegex,
             inverse: inverse, boolean: boolean,
             startLine: UInt(max(0, startLine)),
             endLine: endLine == Int.max ? UInt.max : UInt(endLine))
+        selfTestWaitSearch(from: seq)
     }
 
     /// Whether `pattern` is a valid search expression for the active engine (mirrors
@@ -799,14 +821,29 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     /// Sets the inverse/boolean toggles, then runs `pattern` exactly as a Return press.
     func selfTestRunSearchViaBar(pattern: String, caseInsensitive: Bool, isRegex: Bool,
                                  inverse: Bool, boolean: Bool) {
+        let seq = selfTestSearchFinishSeq
         tabController.selfTestRunSearchViaBar(pattern: pattern, caseInsensitive: caseInsensitive,
                                               isRegex: isRegex, inverse: inverse, boolean: boolean)
+        selfTestWaitSearch(from: seq)
     }
 
     /// Set / clear the active tab's search-range limits via the context-menu code path.
-    func selfTestSetSearchStart(line: Int) { tabController.currentTab?.setSearchStart(line: line) }
-    func selfTestSetSearchEnd(line: Int)   { tabController.currentTab?.setSearchEnd(line: line) }
-    func selfTestClearSearchLimits()       { tabController.currentTab?.clearSearchLimits() }
+    /// Each re-runs the last search, so block until that completes.
+    func selfTestSetSearchStart(line: Int) {
+        let seq = selfTestSearchFinishSeq
+        tabController.currentTab?.setSearchStart(line: line)
+        selfTestWaitSearch(from: seq)
+    }
+    func selfTestSetSearchEnd(line: Int) {
+        let seq = selfTestSearchFinishSeq
+        tabController.currentTab?.setSearchEnd(line: line)
+        selfTestWaitSearch(from: seq)
+    }
+    func selfTestClearSearchLimits() {
+        let seq = selfTestSearchFinishSeq
+        tabController.currentTab?.clearSearchLimits()
+        selfTestWaitSearch(from: seq)
+    }
 
     /// The active tab's current search-range limits (start inclusive, end exclusive).
     var selfTestSearchRange: (start: Int, end: Int) {

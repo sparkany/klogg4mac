@@ -33,6 +33,10 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     let mainView: LogScrollView
     let filteredView: LogScrollView
     private let searchBar = SearchBarView()
+    /// Monotonic counter bumped each time a search COMPLETES. The headless harness
+    /// waits for this to advance (rather than polling the match-count value, which
+    /// can't tell a freshly-finished search from a previous one with the same count).
+    private(set) var searchFinishSeq = 0
 
     /// Per-file line marks (bookmarks), shared by the main + filtered views (marks are
     /// keyed by SOURCE line). Persisted per file path; isolated under --selftest.
@@ -825,6 +829,7 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         // Reload the filtered view honouring the current visibility mode (the search
         // result feeds Matches / Marks-and-matches; refreshOverview is called there).
         recomputeFilteredVisibility()
+        searchFinishSeq &+= 1
     }
 }
 
