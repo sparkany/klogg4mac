@@ -491,6 +491,25 @@ enum SelfTest {
         let dir = ProcessInfo.processInfo.environment["KLOGG_SNAPSHOT_DIR"] ?? NSTemporaryDirectory()
         let snap = (dir as NSString).appendingPathComponent("klogg-snapshot-marks.png")
         s += wc.selfTestSnapshot(to: snap) ? "PASS wrote \(snap)\n" : "FAIL marks snapshot\n"
+
+        // (a2) Marks must still render with the line-number gutter OFF (klogg keeps a
+        // dedicated bullet margin). Toggle line numbers off, re-mark a couple of lines,
+        // and snapshot: the gutter collapses to width 0 but the mark zone persists.
+        _ = wc.selfTestToggleMark(line: 1)
+        _ = wc.selfTestToggleMark(line: 4)
+        let lnWasOn = AppPreferences.shared.lineNumbersInMain
+        AppPreferences.shared.lineNumbersInMain = false
+        wc.selfTestApplyPreferencesToCurrentTab()
+        let gutterOff = wc.selfTestMainGutterWidth
+        s += gutterOff == 0
+            ? "PASS line-number gutter hidden (width=0) while marks remain in their zone\n"
+            : "FAIL gutter not hidden with line numbers off (width=\(gutterOff))\n"
+        let snapNoLn = (dir as NSString).appendingPathComponent("klogg-snapshot-marks-no-linenumbers.png")
+        s += wc.selfTestSnapshot(to: snapNoLn)
+            ? "PASS wrote \(snapNoLn)\n" : "FAIL marks (no line numbers) snapshot\n"
+        // Restore line-number preference + clean marks.
+        AppPreferences.shared.lineNumbersInMain = lnWasOn
+        wc.selfTestApplyPreferencesToCurrentTab()
         wc.selfTestClearMarks()
 
         // (b) Context menu mirrors klogg's abstractlogview popup.
@@ -732,6 +751,13 @@ enum SelfTest {
         s += unionRows == 6
             ? "PASS Marks-and-matches mode: union shows 6 rows (4 matches ∪ 2 marks)\n"
             : "FAIL Marks-and-matches mode: \(unionRows) rows (expected 6)\n"
+
+        // Scrollbar markers (klogg scrollbar overview): main = 4 matches + 2 marks = 6;
+        // filtered (union mode) = one per row = 6.
+        let counts = wc.selfTestScrollbarMarkerCounts
+        s += (counts.main == 6 && counts.filtered == 6)
+            ? "PASS scrollbar markers: main=\(counts.main) (4 matches + 2 marks), filtered=\(counts.filtered)\n"
+            : "FAIL scrollbar markers: main=\(counts.main) filtered=\(counts.filtered) (expected 6/6)\n"
 
         // Snapshot the klogg-style layout: search bar between the panes, lower pane filled.
         let dir = ProcessInfo.processInfo.environment["KLOGG_SNAPSHOT_DIR"] ?? NSTemporaryDirectory()

@@ -105,6 +105,17 @@ final class LogScrollView: NSScrollView {
     /// Repaint (e.g. after marks change elsewhere).
     func refresh() { docView.needsDisplay = true }
 
+    /// Paint match/mark tick markers on this view's vertical scrollbar trough (klogg
+    /// scrollbar overview). `total` is the file height the trough represents; each
+    /// marker is a (source line, colour) pair. Pass an empty array to clear.
+    func setScrollbarMarkers(_ markers: [MarkerScroller.Marker], total: Int) {
+        markerScroller.totalLines = total
+        markerScroller.markers = markers
+    }
+
+    /// Number of scrollbar markers currently set (headless assertions).
+    var scrollbarMarkerCount: Int { markerScroller.markers.count }
+
     /// Titles of the current context menu's non-separator items (headless assertions).
     func contextMenuItemTitles() -> [String] {
         docView.buildContextMenu().items.filter { !$0.isSeparatorItem }.map { $0.title }
@@ -119,6 +130,9 @@ final class LogScrollView: NSScrollView {
         return docView.currentSelectedLine ?? -1
     }
 
+    /// Custom vertical scroller that overlays match/mark tick markers (klogg overview).
+    private let markerScroller = MarkerScroller(frame: NSRect(x: 0, y: 0, width: 16, height: 100))
+
     init(engine: KloggEngine, mode: LogViewMode = .main) {
         docView = LogDocumentView(engine: engine, mode: mode)
         gutter  = LogLineNumberGutter(font: docView.logFont, rowHeight: docView.rowHeight)
@@ -126,6 +140,11 @@ final class LogScrollView: NSScrollView {
         translatesAutoresizingMaskIntoConstraints = false
         hasVerticalScroller   = true
         hasHorizontalScroller = true
+        // Install the marker-painting vertical scroller (klogg scrollbar overview).
+        // Force the legacy (non-overlay) style so the trough — and thus the markers —
+        // stay visible regardless of the user's "show scrollbars" system setting.
+        scrollerStyle         = .legacy
+        verticalScroller      = markerScroller
         borderType            = .noBorder
         documentView          = docView
 
@@ -344,7 +363,7 @@ final class LogDocumentView: NSView {
         case .filtered: line = engine.filteredLines(in: r, expandTabs: true).first ?? ""
         }
         let gutterWidth = lineNumbersEnabled ? (gutterView?.gutterWidth ?? 0) : 0
-        let textX = gutterWidth + textLeftPadding
+        let textX = effectiveMarkZoneWidth + gutterWidth + textLeftPadding
         let viewportWidth = enclosingScrollView?.contentView.bounds.width ?? bounds.width
         let wrapWidth = max(20, viewportWidth - textX - 6)
         let attr = NSAttributedString(string: line, attributes: [
@@ -480,9 +499,16 @@ final class LogDocumentView: NSView {
     /// True when this filtered view is rendering an explicit source-line list.
     private var usesSourceList: Bool { mode == .filtered && filteredSourceLines != nil }
 
-    /// Width of the mark-indicator zone painted at the left edge of the gutter when a
-    /// marks store is present. Mirrors klogg's bullet/arrow zone (abstractlogview).
+    /// Width of the mark-indicator zone painted at the LEFT edge (before the line-number
+    /// gutter) when a marks store is present. Mirrors klogg's bullet/arrow margin
+    /// (abstractlogview), which is always shown — even when line numbers are OFF — so a
+    /// marked line is visible without the gutter.
     private let markZoneWidth: CGFloat = 11
+
+    /// The effective mark-zone width: markZoneWidth when a marks store is attached,
+    /// else 0. This zone sits to the LEFT of the line-number gutter and is independent
+    /// of the line-number preference, so marks always have a place to draw.
+    private var effectiveMarkZoneWidth: CGFloat { marksStore != nil ? markZoneWidth : 0 }
 
     /// Source (original file) line for a row in this view's coordinate space.
     /// .main: identity. .filtered: the match's source line (falls back to row).
@@ -661,10 +687,12 @@ final class LogDocumentView: NSView {
         // Fetch visible lines from engine (O(visible rows)).
         let fetched = fetchRows(first: firstRow, last: lastRow)
 
-        // Gutter visibility is preference-driven: when line numbers are off for
-        // this mode, the gutter collapses to width 0 and text starts at the left.
+        // Left margins: [mark zone][line-number gutter][text]. The mark zone is shown
+        // whenever marks are enabled (independent of line numbers); the gutter is
+        // preference-driven and collapses to 0 when line numbers are off.
+        let markZone    = effectiveMarkZoneWidth
         let gutterWidth = lineNumbersEnabled ? (gutterView?.gutterWidth ?? 0) : 0
-        let textX       = gutterWidth + textLeftPadding
+        let textX       = markZone + gutterWidth + textLeftPadding
 
         let hideAnsi = AppPreferences.shared.hideAnsiColors
 
@@ -722,11 +750,11 @@ final class LogDocumentView: NSView {
             visibleLineCache[row] = lineText
         }
 
-        // 2) Line-number gutter, painted last so it overlays the text and stays
-        //    pinned to the viewport's left edge as the content scrolls horizontally.
-        if gutterWidth > 0 {
+        // 2) Mark zone + line-number gutter, painted last so they overlay the text and
+        //    stay pinned to the viewport's left edge as the content scrolls horizontally.
+        if markZone > 0 || gutterWidth > 0 {
             drawGutter(dirtyRect: dirtyRect, firstRow: firstRow, lastRow: lastRow,
-                       gutterWidth: gutterWidth)
+                       markZone: markZone, gutterWidth: gutterWidth)
         }
     }
 
@@ -744,8 +772,9 @@ final class LogDocumentView: NSView {
     /// the first logical line implied by the scroll offset and stacks each subsequent
     /// line's wrapped height down the viewport until past dirtyRect. O(visible lines).
     private func drawWrapped(dirtyRect: NSRect) {
+        let markZone    = effectiveMarkZoneWidth
         let gutterWidth = lineNumbersEnabled ? (gutterView?.gutterWidth ?? 0) : 0
-        let textX       = gutterWidth + textLeftPadding
+        let textX       = markZone + gutterWidth + textLeftPadding
         let scrollX     = enclosingScrollView?.contentView.bounds.origin.x ?? 0
         // Text wraps to the space between the gutter and the right edge of the viewport.
         let viewportWidth = enclosingScrollView?.contentView.bounds.width ?? bounds.width
@@ -779,23 +808,31 @@ final class LogDocumentView: NSView {
             }
         }
 
-        // Gutter band + per-line numbers on the first visual row of each logical line.
-        if gutterWidth > 0 {
+        // Mark zone + gutter band + per-line numbers on the first visual row of each
+        // logical line.
+        let totalMargin = markZone + gutterWidth
+        if totalMargin > 0 {
             (NSColor(named: NSColor.Name("gutterBackground")) ?? NSColor.controlBackgroundColor).setFill()
-            NSRect(x: scrollX, y: dirtyRect.minY, width: gutterWidth, height: dirtyRect.height).fill()
+            NSRect(x: scrollX, y: dirtyRect.minY, width: totalMargin, height: dirtyRect.height).fill()
             NSColor.separatorColor.setFill()
-            NSRect(x: scrollX + gutterWidth - 1, y: dirtyRect.minY, width: 1, height: dirtyRect.height).fill()
+            NSRect(x: scrollX + totalMargin - 1, y: dirtyRect.minY, width: 1, height: dirtyRect.height).fill()
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: logFont, .foregroundColor: NSColor.secondaryLabelColor,
             ]
             let innerPad: CGFloat = 6
             for entry in rowYs {
-                let displayNum = sourceLine(forRow: entry.row) + 1
-                let label = "\(displayNum)" as NSString
-                let size  = label.size(withAttributes: attrs)
-                let lx = scrollX + gutterWidth - innerPad - size.width
-                let ly = entry.y + (rowHeight - size.height) / 2
-                label.draw(at: NSPoint(x: lx, y: ly), withAttributes: attrs)
+                if gutterWidth > 0 {
+                    let displayNum = sourceLine(forRow: entry.row) + 1
+                    let label = "\(displayNum)" as NSString
+                    let size  = label.size(withAttributes: attrs)
+                    let lx = scrollX + markZone + gutterWidth - innerPad - size.width
+                    let ly = entry.y + (rowHeight - size.height) / 2
+                    label.draw(at: NSPoint(x: lx, y: ly), withAttributes: attrs)
+                }
+                if markZone > 0, let store = marksStore,
+                   store.isMarked(sourceLine(forRow: entry.row)) {
+                    drawMarkArrow(atX: scrollX, rowTop: entry.y)
+                }
             }
         }
     }
@@ -897,21 +934,24 @@ final class LogDocumentView: NSView {
             options: .regularExpression)
     }
 
-    /// Paint the line-number gutter band at the left edge of the visible viewport.
-    /// Drawn in document coordinates but offset by the clip view's horizontal scroll
-    /// so it appears frozen at the left (klogg's abstractlogview left margin).
+    /// Paint the left margins — [mark zone][line-number gutter] — at the left edge of
+    /// the visible viewport. Drawn in document coordinates but offset by the clip view's
+    /// horizontal scroll so they appear frozen at the left (klogg abstractlogview margin).
+    /// `markZone` is the dedicated bullet column (shown even when line numbers are off);
+    /// `gutterWidth` is the line-number band (0 when line numbers are off).
     private func drawGutter(dirtyRect: NSRect, firstRow: Int, lastRow: Int,
-                            gutterWidth: CGFloat) {
+                            markZone: CGFloat, gutterWidth: CGFloat) {
         let scrollX = enclosingScrollView?.contentView.bounds.origin.x ?? 0
+        let totalWidth = markZone + gutterWidth
         let band = NSRect(x: scrollX, y: dirtyRect.minY,
-                          width: gutterWidth, height: dirtyRect.height)
+                          width: totalWidth, height: dirtyRect.height)
 
         (NSColor(named: NSColor.Name("gutterBackground")) ?? NSColor.controlBackgroundColor).setFill()
         band.fill()
 
-        // Separator rule on the gutter's right edge.
+        // Separator rule on the right edge of the whole margin.
         NSColor.separatorColor.setFill()
-        NSRect(x: scrollX + gutterWidth - 1, y: dirtyRect.minY,
+        NSRect(x: scrollX + totalWidth - 1, y: dirtyRect.minY,
                width: 1, height: dirtyRect.height).fill()
 
         let attrs: [NSAttributedString.Key: Any] = [
@@ -920,18 +960,22 @@ final class LogDocumentView: NSView {
         ]
         let innerPad: CGFloat = 6
         for row in firstRow ... lastRow {
-            // In the filtered view, show each row's ORIGINAL source line number
-            // (as klogg does); in the main view, the row index is the line number.
-            let displayNum = sourceLine(forRow: row) + 1
-            let label = "\(displayNum)" as NSString
-            let size  = label.size(withAttributes: attrs)
-            let x = scrollX + gutterWidth - innerPad - size.width
-            let y = CGFloat(row) * rowHeight + (rowHeight - size.height) / 2
-            label.draw(at: NSPoint(x: x, y: y), withAttributes: attrs)
+            // Line numbers right-align within the gutter band (to the right of the
+            // mark zone), only when the gutter is shown.
+            if gutterWidth > 0 {
+                let displayNum = sourceLine(forRow: row) + 1
+                let label = "\(displayNum)" as NSString
+                let size  = label.size(withAttributes: attrs)
+                let x = scrollX + markZone + gutterWidth - innerPad - size.width
+                let y = CGFloat(row) * rowHeight + (rowHeight - size.height) / 2
+                label.draw(at: NSPoint(x: x, y: y), withAttributes: attrs)
+            }
 
-            // Mark indicator (klogg's bullet/arrow): a filled arrow at the gutter's
-            // left edge for marked source lines.
-            if let store = marksStore, store.isMarked(sourceLine(forRow: row)) {
+            // Mark indicator (klogg's bullet/arrow): a filled arrow in the mark zone at
+            // the very left, drawn whenever the line is marked — independent of the
+            // line-number gutter.
+            if markZone > 0, let store = marksStore,
+               store.isMarked(sourceLine(forRow: row)) {
                 drawMarkArrow(atX: scrollX, rowTop: CGFloat(row) * rowHeight)
             }
         }
@@ -969,11 +1013,12 @@ final class LogDocumentView: NSView {
         let line  = lineIndex(for: point)
 
         // Click in the left mark zone toggles a mark on that line (klogg: clicking the
-        // left bullet margin marks the line). The mark zone is the left edge of the
-        // gutter, frozen at the viewport's left edge.
-        if let store = marksStore, lineNumbersEnabled {
+        // left bullet margin marks the line). The mark zone is the leftmost margin,
+        // frozen at the viewport's left edge, and is present whenever marks are enabled
+        // (independent of the line-number gutter).
+        if let store = marksStore {
             let scrollX = enclosingScrollView?.contentView.bounds.origin.x ?? 0
-            if point.x >= scrollX && point.x < scrollX + markZoneWidth {
+            if point.x >= scrollX && point.x < scrollX + effectiveMarkZoneWidth {
                 store.toggle(lines: [sourceLine(forRow: line)])
                 needsDisplay = true
                 return

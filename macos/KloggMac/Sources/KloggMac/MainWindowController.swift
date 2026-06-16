@@ -780,6 +780,11 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         tabController.matchLabel(forCount: count)
     }
 
+    /// (main, filtered) scrollbar marker counts on the active tab (headless assertion).
+    var selfTestScrollbarMarkerCounts: (main: Int, filtered: Int) {
+        tabController.currentScrollbarMarkerCounts
+    }
+
     // --- Color labels (headless) ---
 
     /// Select main-view line `line` (0-based), assign it to colour `slot`, and return

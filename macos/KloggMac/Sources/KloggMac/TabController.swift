@@ -104,6 +104,9 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
             recomputeFilteredVisibility()
         } else {
             filteredView.refresh()
+            // Marks moved but the filtered set didn't — still repaint the scrollbar
+            // markers so the main-view marks show/clear on the trough.
+            refreshScrollbarMarkers()
         }
     }
 
@@ -345,6 +348,44 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         overview.viewportLineCount = mainView.visibleLineCount
     }
 
+    // MARK: - Scrollbar markers (klogg scrollbar overview)
+
+    /// Repaint the match/mark tick markers on both views' vertical scrollbars.
+    ///
+    /// The MAIN view's trough spans the whole file; we plot every search match (yellow)
+    /// plus every mark (blue) by source line. The FILTERED view's trough spans its own
+    /// rows; each row is a hit, so we plot a tick per row (red for a match, blue for a
+    /// marked line). O(matches + marks).
+    func refreshScrollbarMarkers() {
+        let total = Int(engine.lineCount())
+        let matchColor = NSColor.systemYellow
+        let markColor  = NSColor.systemBlue
+
+        // Main view: matches + marks over the full file height.
+        var mainMarkers: [MarkerScroller.Marker] = []
+        let n = Int(engine.searchMatchCount())
+        mainMarkers.reserveCapacity(n + marksStore.marks.count)
+        for i in 0 ..< n {
+            let src = engine.searchMatchLine(at: UInt(i))
+            if src != UInt.max { mainMarkers.append(.init(line: Int(src), color: matchColor)) }
+        }
+        for m in marksStore.marks {
+            mainMarkers.append(.init(line: m, color: markColor))
+        }
+        mainView.setScrollbarMarkers(mainMarkers, total: total)
+
+        // Filtered view: one tick per visible row, over the filtered row count.
+        let rows = filteredView.lineCount
+        var filteredMarkers: [MarkerScroller.Marker] = []
+        filteredMarkers.reserveCapacity(rows)
+        for r in 0 ..< rows {
+            let src = filteredView.sourceLine(forRow: r)
+            let isMark = marksStore.isMarked(src)
+            filteredMarkers.append(.init(line: r, color: isMark ? markColor : NSColor.systemRed))
+        }
+        filteredView.setScrollbarMarkers(filteredMarkers, total: max(1, rows))
+    }
+
     // MARK: - Search
 
     private func startSearch(pattern: String, caseInsensitive: Bool, isRegex: Bool) {
@@ -399,6 +440,7 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
             filteredView.reloadFromEngine(lineCount: union.count)
         }
         refreshOverview()
+        refreshScrollbarMarkers()
     }
 
     /// Give keyboard focus to the search field.
@@ -580,6 +622,7 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     func kloggEngine(_ engine: Any, loadingFinished success: Bool) {
         mainView.reloadFromEngine()
         refreshOverview()
+        refreshScrollbarMarkers()
         onLoadingFinished?(self, success)
         // When following, every re-index (file grew) ends here — jump to the new tail.
         if isFollowing { scrollMainToEnd() }
@@ -687,6 +730,12 @@ final class TabController: NSViewController {
     /// Render the active tab's match label for `count` (headless, deterministic).
     func matchLabel(forCount count: Int) -> String {
         currentTab?.selfTestMatchLabel(forCount: count) ?? ""
+    }
+
+    /// Scrollbar marker counts on the active tab (main, filtered) — headless assertion.
+    var currentScrollbarMarkerCounts: (main: Int, filtered: Int) {
+        guard let tab = currentTab else { return (0, 0) }
+        return (tab.mainView.scrollbarMarkerCount, tab.filteredView.scrollbarMarkerCount)
     }
 
     /// Whether the active tab's overview strip is visible (defaults to the persisted
