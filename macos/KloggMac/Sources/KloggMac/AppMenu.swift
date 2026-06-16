@@ -344,6 +344,31 @@ final class AppMenu {
         reload.keyEquivalentModifierMask = [.command]
         reload.target = nil
 
+        menu.addItem(.separator())
+
+        // Font zoom — klogg uses Ctrl+wheel (changeFontSize); on macOS we also expose
+        // the standard ⌘+ / ⌘- / ⌘0 commands. Ctrl+wheel is handled in LogDocumentView.
+        let zoomIn = menu.addItem(
+            withTitle: "Increase Font Size",
+            action: #selector(MainWindowController.increaseFontSize(_:)),
+            keyEquivalent: "+")
+        zoomIn.keyEquivalentModifierMask = [.command]
+        zoomIn.target = nil
+
+        let zoomOut = menu.addItem(
+            withTitle: "Decrease Font Size",
+            action: #selector(MainWindowController.decreaseFontSize(_:)),
+            keyEquivalent: "-")
+        zoomOut.keyEquivalentModifierMask = [.command]
+        zoomOut.target = nil
+
+        let zoomReset = menu.addItem(
+            withTitle: "Reset Font Size",
+            action: #selector(MainWindowController.resetFontSize(_:)),
+            keyEquivalent: "0")
+        zoomReset.keyEquivalentModifierMask = [.command]
+        zoomReset.target = nil
+
         item.submenu = menu
         return item
     }

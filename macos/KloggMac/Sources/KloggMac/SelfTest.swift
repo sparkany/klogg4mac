@@ -10,6 +10,7 @@
 //
 
 import AppKit
+import KloggBridge
 
 enum SelfTest {
 
@@ -40,6 +41,8 @@ enum SelfTest {
         out += "\n" + quickFindEdgeTests(wc)
         out += "\n" + goToLineBoundsTests(wc)
         out += "\n" + edgeRobustnessTests(wc)
+        out += "\n" + decompressionTests(wc)
+        out += "\n" + fontZoomTests(wc)
         out += "\n" + shortcutAudit()
         out += "===== END SELFTEST =====\n"
         FileHandle.standardError.write(out.data(using: .utf8)!)
@@ -1459,6 +1462,160 @@ enum SelfTest {
         while wc.selfTestTabCount > startCount { wc.closeCurrentTab(nil) }
         wc.closeCurrentTab(nil)   // extra close with (potentially) nothing to close
         s += "PASS close beyond last tab: no crash (count=\(wc.selfTestTabCount))\n"
+        return s
+    }
+
+    // MARK: - Compressed-log opening (Wave 14)
+
+    /// Prove transparent decompression of single-stream archives (.gz/.bz2/.xz),
+    /// mirroring klogg's MainWindow::extractAndLoadFile via decompressor.cpp. For each
+    /// format: write a known plaintext, compress it with the system tool, open the
+    /// compressed path, and assert the engine indexed the SAME line count as the
+    /// plaintext while the tab kept the ORIGINAL (compressed) display name.
+    private static func decompressionTests(_ wc: MainWindowController) -> String {
+        var s = "--- DECOMPRESSION TESTS (gz / bz2 / xz) ---\n"
+
+        // 1) Detection predicate matches klogg's archiveTypeByExtension (gz/bz2/xz/lzma
+        //    yes; tar.* / zip / 7z no).
+        let yes = ["a.gz", "b.bz2", "c.xz", "d.lzma"]
+        let no  = ["e.tar.gz", "f.tgz", "g.zip", "h.7z", "i.txz", "j.log"]
+        let detYes = yes.allSatisfy { KloggDecompressor.isDecompressiblePath($0) }
+        let detNo  = no.allSatisfy  { !KloggDecompressor.isDecompressiblePath($0) }
+        s += (detYes && detNo)
+            ? "PASS format detection (gz/bz2/xz/lzma yes; tar.*/zip/7z no)\n"
+            : "FAIL format detection (yes=\(detYes) no=\(detNo))\n"
+
+        let tmp = NSTemporaryDirectory() as NSString
+        let plainPath = tmp.appendingPathComponent("klogg-decomp-\(UUID().uuidString).log")
+        let body = (1...12).map { "decompress line \($0)" }.joined(separator: "\n") + "\n"
+        guard (try? body.write(toFile: plainPath, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write plaintext\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: plainPath) }
+
+        // Index the plaintext to learn the expected line count.
+        let startTabs = wc.selfTestTabCount
+        wc.selfTestOpen(plainPath)
+        _ = wait { wc.selfTestCurrentLineCount >= 12 }
+        let expected = wc.selfTestCurrentLineCount
+        wc.closeCurrentTab(nil)
+
+        // For each compressor available on the machine, compress + open + assert.
+        func runTool(_ launch: String, _ args: [String]) -> Bool {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: launch)
+            p.arguments = args
+            do { try p.run(); p.waitUntilExit(); return p.terminationStatus == 0 }
+            catch { return false }
+        }
+
+        let cases: [(name: String, suffix: String, tool: String, args: [String])] = [
+            ("gzip",  ".gz",  "/usr/bin/gzip",  ["-kf"]),
+            ("bzip2", ".bz2", "/usr/bin/bzip2", ["-kf"]),
+            ("xz",    ".xz",  "/usr/bin/xz",    ["-kf"]),
+        ]
+
+        for c in cases {
+            // Copy the plaintext to a uniquely named source so tools don't clobber.
+            let src = tmp.appendingPathComponent("klogg-decomp-\(c.name)-\(UUID().uuidString).log")
+            try? FileManager.default.copyItem(atPath: plainPath, toPath: src)
+            let compressed = src + c.suffix
+            // Locate the tool (xz may live under Homebrew rather than /usr/bin).
+            var tool = c.tool
+            if !FileManager.default.isExecutableFile(atPath: tool) {
+                let hb = "/opt/homebrew/bin/" + c.name
+                if FileManager.default.isExecutableFile(atPath: hb) { tool = hb }
+            }
+            guard FileManager.default.isExecutableFile(atPath: tool),
+                  runTool(tool, c.args + [src]),
+                  FileManager.default.fileExists(atPath: compressed) else {
+                s += "SKIP \(c.name): tool unavailable\n"
+                try? FileManager.default.removeItem(atPath: src)
+                continue
+            }
+            defer {
+                try? FileManager.default.removeItem(atPath: src)
+                try? FileManager.default.removeItem(atPath: compressed)
+            }
+
+            wc.selfTestOpen(compressed)
+            let ok = wait { wc.selfTestCurrentLineCount == expected }
+            let got = wc.selfTestCurrentLineCount
+            // The displayed path must remain the ORIGINAL compressed file, not the temp.
+            let display = wc.selfTestCurrentFilePath
+            let nameOK = display == compressed
+            s += (ok && nameOK)
+                ? "PASS \(c.name): indexed \(got) lines, display name kept (\((compressed as NSString).lastPathComponent))\n"
+                : "FAIL \(c.name): got \(got) (expected \(expected)) display=\(display ?? "nil")\n"
+            wc.closeCurrentTab(nil)
+        }
+
+        // Clean up any tabs we opened.
+        while wc.selfTestTabCount > startTabs { wc.closeCurrentTab(nil) }
+        return s
+    }
+
+    // MARK: - Font zoom (Wave 14)
+
+    /// Prove the font-size zoom commands (klogg Ctrl+wheel / changeFontSize, exposed on
+    /// macOS as ⌘+ / ⌘- / ⌘0) live-apply: increasing the size grows the main view's row
+    /// height, decreasing shrinks it back, and the size clamps to [min,max].
+    private static func fontZoomTests(_ wc: MainWindowController) -> String {
+        var s = "--- FONT ZOOM TESTS ---\n"
+
+        let p = AppPreferences.shared
+        let original = p.fontSize
+
+        // Open a small file so there's a live main view to measure.
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-zoom-\(UUID().uuidString).log")
+        try? "alpha\nbravo\ncharlie\n".write(toFile: path, atomically: true, encoding: .utf8)
+        defer {
+            try? FileManager.default.removeItem(atPath: path)
+            p.fontSize = original
+        }
+        let startTabs = wc.selfTestTabCount
+        wc.selfTestOpen(path)
+        _ = wait { wc.selfTestCurrentLineCount >= 3 }
+
+        // Use the resolved FONT POINT SIZE as the source of truth — integer row-height
+        // quantization can mask a 1pt change, so assert on the font itself. Apply
+        // synchronously (matching preferencesLiveApplyTests) rather than waiting on the
+        // async .preferencesDidChange post.
+        p.fontSize = 12
+        wc.selfTestApplyPreferencesToCurrentTab()
+        let pt12 = wc.selfTestMainFontPointSize
+        let h12  = wc.selfTestMainRowHeight
+
+        p.changeFontSize(increase: true)   // 13
+        wc.selfTestApplyPreferencesToCurrentTab()
+        let ptUp = wc.selfTestMainFontPointSize
+        s += (p.fontSize == 13 && ptUp == 13)
+            ? "PASS increase font: pref 12→13, view font \(pt12)→\(ptUp)pt (rowHeight \(h12)→\(wc.selfTestMainRowHeight))\n"
+            : "FAIL increase font: pref=\(p.fontSize) viewFont \(pt12)→\(ptUp)pt\n"
+
+        p.changeFontSize(increase: false)  // 12
+        wc.selfTestApplyPreferencesToCurrentTab()
+        let ptDown = wc.selfTestMainFontPointSize
+        s += (p.fontSize == 12 && ptDown == 12)
+            ? "PASS decrease font: pref 13→12, view font back to \(ptDown)pt\n"
+            : "FAIL decrease font: pref=\(p.fontSize) viewFont=\(ptDown)pt\n"
+
+        // Clamp at the lower bound.
+        p.fontSize = AppPreferences.minFontSize
+        p.changeFontSize(increase: false)
+        s += p.fontSize == AppPreferences.minFontSize
+            ? "PASS lower clamp holds at \(AppPreferences.minFontSize)\n"
+            : "FAIL lower clamp: \(p.fontSize)\n"
+
+        // Clamp at the upper bound.
+        p.fontSize = AppPreferences.maxFontSize
+        p.changeFontSize(increase: true)
+        s += p.fontSize == AppPreferences.maxFontSize
+            ? "PASS upper clamp holds at \(AppPreferences.maxFontSize)\n"
+            : "FAIL upper clamp: \(p.fontSize)\n"
+
+        while wc.selfTestTabCount > startTabs { wc.closeCurrentTab(nil) }
         return s
     }
 

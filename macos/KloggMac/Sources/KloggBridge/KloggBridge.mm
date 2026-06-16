@@ -564,3 +564,181 @@ static RegularExpressionPattern makePattern(NSString* pattern, BOOL caseInsensit
 }
 
 @end
+
+// MARK: - KloggDecompressor
+
+#include <zlib.h>
+#include <bzlib.h>
+#include <lzma.h>
+
+namespace {
+
+constexpr size_t kDecompChunk = 4 * 1024 * 1024;  // 4 MiB, matches decompressor.cpp
+
+// Detect a single-stream compression format by extension, mirroring
+// archiveTypeByExtension() in src/ui/src/decompressor.cpp (Gz/Bz2/Xz only — tar.*
+// and zip/7z need KArchive, which we deliberately don't support here).
+enum class CompFormat { None, Gz, Bz2, Xz };
+
+CompFormat formatForPath(NSString* path)
+{
+    NSString* lower = path.lowercaseString;
+    // Exclude multi-file tar archives (tar.gz / tgz / tbz2 / txz …).
+    if ([lower hasSuffix:@".tar.gz"] || [lower hasSuffix:@".tgz"]
+        || [lower hasSuffix:@".tar.bz2"] || [lower hasSuffix:@".tbz2"] || [lower hasSuffix:@".tbz"]
+        || [lower hasSuffix:@".tar.xz"] || [lower hasSuffix:@".txz"]
+        || [lower hasSuffix:@".tar.lzma"]) {
+        return CompFormat::None;
+    }
+    if ([lower hasSuffix:@".gz"])   return CompFormat::Gz;
+    if ([lower hasSuffix:@".bz2"])  return CompFormat::Bz2;
+    if ([lower hasSuffix:@".xz"] || [lower hasSuffix:@".lzma"]) return CompFormat::Xz;
+    return CompFormat::None;
+}
+
+NSError* makeError(NSString* msg)
+{
+    return [NSError errorWithDomain:@"KloggDecompressor"
+                               code:1
+                           userInfo:@{ NSLocalizedDescriptionKey: msg }];
+}
+
+// gzip → out fd, using zlib's gz* helpers (handles the gzip container directly).
+bool decompressGz(NSString* path, int outFd, NSError** error)
+{
+    gzFile in = gzopen(path.fileSystemRepresentation, "rb");
+    if (!in) { if (error) *error = makeError(@"gzopen failed"); return false; }
+    std::vector<char> buf(kDecompChunk);
+    bool ok = true;
+    for (;;) {
+        int n = gzread(in, buf.data(), (unsigned)buf.size());
+        if (n < 0)  { ok = false; if (error) *error = makeError(@"gzread error"); break; }
+        if (n == 0) break;  // EOF
+        if (write(outFd, buf.data(), (size_t)n) != n) {
+            ok = false; if (error) *error = makeError(@"write error"); break;
+        }
+    }
+    gzclose(in);
+    return ok;
+}
+
+// bzip2 → out fd, via BZ2_bzRead on a stdio FILE*.
+bool decompressBz2(NSString* path, int outFd, NSError** error)
+{
+    FILE* f = fopen(path.fileSystemRepresentation, "rb");
+    if (!f) { if (error) *error = makeError(@"fopen failed"); return false; }
+    int bzerr = BZ_OK;
+    BZFILE* bz = BZ2_bzReadOpen(&bzerr, f, 0, 0, nullptr, 0);
+    if (bzerr != BZ_OK) { fclose(f); if (error) *error = makeError(@"BZ2_bzReadOpen failed"); return false; }
+    std::vector<char> buf(kDecompChunk);
+    bool ok = true;
+    for (;;) {
+        int n = BZ2_bzRead(&bzerr, bz, buf.data(), (int)buf.size());
+        if (n > 0) {
+            if (write(outFd, buf.data(), (size_t)n) != n) {
+                ok = false; if (error) *error = makeError(@"write error"); break;
+            }
+        }
+        if (bzerr == BZ_STREAM_END) break;
+        if (bzerr != BZ_OK) { ok = false; if (error) *error = makeError(@"BZ2_bzRead error"); break; }
+    }
+    int closeErr = BZ_OK;
+    BZ2_bzReadClose(&closeErr, bz);
+    fclose(f);
+    return ok;
+}
+
+// xz / lzma → out fd, using liblzma's auto-decoder (handles both .xz and legacy .lzma).
+bool decompressXz(NSString* path, int outFd, NSError** error)
+{
+    FILE* f = fopen(path.fileSystemRepresentation, "rb");
+    if (!f) { if (error) *error = makeError(@"fopen failed"); return false; }
+
+    lzma_stream strm = LZMA_STREAM_INIT;
+    if (lzma_auto_decoder(&strm, UINT64_MAX, 0) != LZMA_OK) {
+        fclose(f); if (error) *error = makeError(@"lzma_auto_decoder init failed"); return false;
+    }
+
+    std::vector<uint8_t> inBuf(kDecompChunk);
+    std::vector<uint8_t> outBuf(kDecompChunk);
+    lzma_action action = LZMA_RUN;
+    strm.next_in = nullptr; strm.avail_in = 0;
+    bool ok = true;
+
+    for (;;) {
+        if (strm.avail_in == 0 && !feof(f)) {
+            size_t r = fread(inBuf.data(), 1, inBuf.size(), f);
+            if (ferror(f)) { ok = false; if (error) *error = makeError(@"fread error"); break; }
+            strm.next_in = inBuf.data();
+            strm.avail_in = r;
+            if (feof(f)) action = LZMA_FINISH;
+        }
+        strm.next_out = outBuf.data();
+        strm.avail_out = outBuf.size();
+
+        lzma_ret ret = lzma_code(&strm, action);
+
+        size_t produced = outBuf.size() - strm.avail_out;
+        if (produced > 0) {
+            if (write(outFd, outBuf.data(), produced) != (ssize_t)produced) {
+                ok = false; if (error) *error = makeError(@"write error"); break;
+            }
+        }
+        if (ret == LZMA_STREAM_END) break;
+        if (ret != LZMA_OK) { ok = false; if (error) *error = makeError(@"lzma_code error"); break; }
+    }
+    lzma_end(&strm);
+    fclose(f);
+    return ok;
+}
+
+}  // namespace
+
+@implementation KloggDecompressor
+
++ (BOOL)isDecompressiblePath:(NSString *)path {
+    return formatForPath(path) != CompFormat::None;
+}
+
++ (nullable NSString *)decompressToTempFile:(NSString *)path
+                                       error:(NSError * _Nullable * _Nullable)error {
+    CompFormat fmt = formatForPath(path);
+    if (fmt == CompFormat::None) {
+        if (error) *error = makeError(@"unsupported archive format");
+        return nil;
+    }
+
+    // Build a temp file that keeps the inner basename (klogg names the temp after the
+    // archive's fileName), so the tab label / encoding heuristics look sensible.
+    NSString* base = path.lastPathComponent.stringByDeletingPathExtension;
+    if (base.length == 0) base = @"klogg_decompressed";
+    NSString* tmpDir = NSTemporaryDirectory();
+    NSString* tmpTemplate = [tmpDir stringByAppendingPathComponent:
+                              [NSString stringWithFormat:@"klogg_%@_XXXXXX", base]];
+    char* tmpl = strdup(tmpTemplate.fileSystemRepresentation);
+    int outFd = mkstemp(tmpl);
+    if (outFd < 0) {
+        free(tmpl);
+        if (error) *error = makeError(@"could not create temp file");
+        return nil;
+    }
+    NSString* outPath = [NSString stringWithUTF8String:tmpl];
+    free(tmpl);
+
+    bool ok = false;
+    switch (fmt) {
+        case CompFormat::Gz:  ok = decompressGz(path, outFd, error);  break;
+        case CompFormat::Bz2: ok = decompressBz2(path, outFd, error); break;
+        case CompFormat::Xz:  ok = decompressXz(path, outFd, error);  break;
+        default: break;
+    }
+    close(outFd);
+
+    if (!ok) {
+        [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+        return nil;
+    }
+    return outPath;
+}
+
+@end

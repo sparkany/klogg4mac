@@ -133,4 +133,24 @@ typedef NS_ENUM(NSInteger, KloggFileChange) {
 
 @end
 
+// MARK: - Decompressor
+
+/// Whether a path looks like a single-stream compressed log klogg can transparently
+/// open (gzip / bzip2 / xz / lzma), mirroring Decompressor::action == Decompress in
+/// src/ui/src/decompressor.cpp. Detection is by extension (.gz/.bz2/.xz/.lzma),
+/// excluding tar.* multi-file archives which require KArchive (not supported here).
+@interface KloggDecompressor : NSObject
+
+/// YES if `path` ends in a supported single-stream compression suffix and is NOT a
+/// tar.* archive. Synchronous, no I/O.
++ (BOOL)isDecompressiblePath:(NSString *)path;
+
+/// Decompress `path` to a freshly-created temp file and return its path, or nil on
+/// failure / unsupported format. Synchronous (runs on the calling thread). The caller
+/// owns the returned temp file. Uses zlib / libbz2 / liblzma (already linked).
++ (nullable NSString *)decompressToTempFile:(NSString *)path
+                                       error:(NSError * _Nullable * _Nullable)error;
+
+@end
+
 NS_ASSUME_NONNULL_END

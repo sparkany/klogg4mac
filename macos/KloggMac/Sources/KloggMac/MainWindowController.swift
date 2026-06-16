@@ -442,6 +442,20 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         tabController.currentTab?.engine.cancel()
     }
 
+    // MARK: - Font zoom (klogg Ctrl+wheel / changeFontSize)
+
+    @objc func increaseFontSize(_ sender: Any?) {
+        AppPreferences.shared.changeFontSize(increase: true)
+    }
+
+    @objc func decreaseFontSize(_ sender: Any?) {
+        AppPreferences.shared.changeFontSize(increase: false)
+    }
+
+    @objc func resetFontSize(_ sender: Any?) {
+        AppPreferences.shared.fontSize = 12
+    }
+
     // MARK: - Tools menu actions
 
     @objc func editPredefinedFilters(_ sender: Any?) {
@@ -908,6 +922,9 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
 
     /// The active tab's main-view row height (changes when the font size changes), or 0.
     var selfTestMainRowHeight: CGFloat { tabController.currentTab?.mainView.rowHeight ?? 0 }
+
+    /// The active tab's main-view font point size (tracks the font-size preference), or 0.
+    var selfTestMainFontPointSize: CGFloat { tabController.currentTab?.mainView.fontPointSize ?? 0 }
 
     /// Whether the active tab's main-view gutter is currently drawn (line numbers on).
     var selfTestMainGutterWidth: CGFloat { tabController.currentTab?.mainView.gutterWidth ?? 0 }

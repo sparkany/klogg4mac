@@ -70,6 +70,13 @@ let _depIncludes: [CXXSetting] = [
     ]),
 ]
 
+// liblzma (xz) ships its header only under Homebrew; zlib/bzlib are in the macOS SDK.
+let _compressionIncludes: [CXXSetting] = [
+    .unsafeFlags([
+        "-isystem", "/opt/homebrew/opt/xz/include",
+    ]),
+]
+
 let _qtIncludes: [CXXSetting] = [
     .unsafeFlags([
         "-F",       _qtRoot + "/lib",
@@ -124,6 +131,7 @@ let _qtLibs: [LinkerSetting] = [
         "-framework", "QtConcurrent",
         "-framework", "Foundation",
         "-framework", "CoreFoundation",
+        "-L", "/opt/homebrew/opt/xz/lib",
         "-lz",
         "-lbz2",
         "-llzma",
@@ -146,6 +154,7 @@ let package = Package(
             cxxSettings: [.define("QT_NO_KEYWORDS")]
                 + _engineIncludes
                 + _depIncludes
+                + _compressionIncludes
                 + _qtIncludes,
             linkerSettings: _kloggLibs + _depLibs + _qtLibs
         ),

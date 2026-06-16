@@ -30,7 +30,19 @@ final class AppPreferences {
 
     var fontSize: Int {
         get { int("mainFont.size", default: 12) }
-        set { set("mainFont.size", i: newValue) }
+        set { set("mainFont.size", i: max(Self.minFontSize, min(Self.maxFontSize, newValue))) }
+    }
+
+    /// Font-size bounds for the zoom commands. klogg steps through the family's
+    /// available point sizes (CrawlerWidget::changeFontSize, crawlerwidget.cpp:1340);
+    /// we step by 1 within these clamps, which covers the same user intent.
+    static let minFontSize = 6
+    static let maxFontSize = 72
+
+    /// Step the main font size up/down by one point (klogg Ctrl+wheel / changeFontSize).
+    /// Clamped to [minFontSize, maxFontSize]. Posts .preferencesDidChange via the setter.
+    func changeFontSize(increase: Bool) {
+        fontSize = fontSize + (increase ? 1 : -1)
     }
 
     var useBoldFont: Bool {

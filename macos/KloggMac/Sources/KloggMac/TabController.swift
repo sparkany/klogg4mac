@@ -24,7 +24,12 @@ import KloggBridge
 final class CrawlerTab: NSViewController, KloggEngineDelegate {
 
     let engine: KloggEngine
+    /// Path the engine actually indexes. For compressed logs this is a decompressed
+    /// temp file; for ordinary files it equals `displayPath`.
     let filePath: String
+    /// Original path shown to the user (tab label, recents, favorites, marks key).
+    /// Differs from `filePath` only when the source was a compressed archive.
+    let displayPath: String
     let mainView: LogScrollView
     let filteredView: LogScrollView
     private let searchBar = SearchBarView()
@@ -61,12 +66,15 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     /// auto-scroll the main view to the tail whenever a re-index finishes.
     private(set) var isFollowing = false
 
-    init(filePath: String) {
+    init(filePath: String, displayPath: String? = nil) {
         self.filePath = filePath
+        self.displayPath = displayPath ?? filePath
         self.engine = KloggEngine()
         self.mainView     = LogScrollView(engine: engine, mode: .main)
         self.filteredView = LogScrollView(engine: engine, mode: .filtered)
-        self.marksStore   = MarksStore(filePath: filePath)
+        // Marks are keyed by the user-facing path so they survive across the
+        // (regenerated) decompression temp file on reopen.
+        self.marksStore   = MarksStore(filePath: self.displayPath)
         super.init(nibName: nil, bundle: nil)
         engine.delegate = self
 
@@ -831,7 +839,7 @@ final class TabController: NSViewController {
         return _tabs[idx]
     }
 
-    var currentFilePath: String? { currentTab?.filePath }
+    var currentFilePath: String? { currentTab?.displayPath }
 
     var currentLineCount: Int {
         guard let tab = currentTab else { return 0 }
@@ -1006,7 +1014,7 @@ final class TabController: NSViewController {
 
     /// Rebuild the custom tab strip from the current tab list + selection.
     private func refreshStrip() {
-        let titles = _tabs.map { ($0.filePath as NSString).lastPathComponent }
+        let titles = _tabs.map { ($0.displayPath as NSString).lastPathComponent }
         tabStrip.reload(titles: titles, selected: selectedIndex() ?? -1)
     }
 
@@ -1014,13 +1022,32 @@ final class TabController: NSViewController {
 
     /// Open `path` in a new tab. If already open, switch to that tab.
     func openFile(path: String) {
-        // If the file is already open, just switch to its tab.
-        if let idx = _tabs.firstIndex(where: { $0.filePath == path }) {
+        // If the file is already open (by user-facing path), just switch to its tab.
+        if let idx = _tabs.firstIndex(where: { $0.displayPath == path }) {
             tabView.selectTabViewItem(at: idx)
             return
         }
 
-        let tab = CrawlerTab(filePath: path)
+        // Transparently decompress single-stream archives (.gz/.bz2/.xz/.lzma) to a
+        // temp file, mirroring klogg's MainWindow::extractAndLoadFile. The engine then
+        // indexes the temp file while the tab keeps the original name. tar/zip/7z need
+        // KArchive and are not supported (NSOpenPanel still allows selecting them, but
+        // they fall through and the engine reports a load failure).
+        var enginePath = path
+        if KloggDecompressor.isDecompressiblePath(path) {
+            do {
+                let tmp = try KloggDecompressor.decompress(toTempFile: path)
+                enginePath = tmp
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Could not open compressed file"
+                alert.informativeText = "\((path as NSString).lastPathComponent): \(error.localizedDescription)"
+                alert.runModal()
+                return
+            }
+        }
+
+        let tab = CrawlerTab(filePath: enginePath, displayPath: path)
         tab.scratchpadProvider = { [weak self] in self?.scratchpadProvider?() }
         tab.onLoadingProgress = { [weak self] t, pct in
             guard self?.currentTab === t else { return }
@@ -1041,8 +1068,8 @@ final class TabController: NSViewController {
         tabView.addTabViewItem(item)
         tabView.selectTabViewItem(item)
 
-        // Kick off the engine load.
-        tab.engine.openFile(atPath: path)
+        // Kick off the engine load on the (possibly decompressed) path.
+        tab.engine.openFile(atPath: enginePath)
         RecentFiles.shared.add(path: path)
         refreshStrip()
     }
@@ -1086,7 +1113,7 @@ final class TabController: NSViewController {
     // MARK: - Session persistence
 
     /// Ordered list of open file paths (for session save).
-    var openFilePaths: [String] { _tabs.map { $0.filePath } }
+    var openFilePaths: [String] { _tabs.map { $0.displayPath } }
 
     /// Index of the active tab (0 if none).
     var activeTabIndex: Int { selectedIndex() ?? 0 }
@@ -1122,7 +1149,7 @@ final class TabController: NSViewController {
 
     private func tabLoadingFinished(tab: CrawlerTab, success: Bool) {
         if let idx = _tabs.firstIndex(where: { $0 === tab }) {
-            tabView.tabViewItem(at: idx).label = (tab.filePath as NSString).lastPathComponent
+            tabView.tabViewItem(at: idx).label = (tab.displayPath as NSString).lastPathComponent
         }
         if currentTab === tab {
             updateStatusBar()
@@ -1137,11 +1164,12 @@ final class TabController: NSViewController {
             return
         }
         let lc = Int(tab.engine.lineCount())
+        // Size/mtime reflect the indexed content (decompressed temp for archives).
         let attrs = try? FileManager.default.attributesOfItem(atPath: tab.filePath)
         let sz = attrs?[.size] as? Int64
         let modified = attrs?[.modificationDate] as? Date
         statusBar?.update(
-            filePath: tab.filePath,
+            filePath: tab.displayPath,
             lineCount: lc,
             fileSize: sz,
             encoding: "UTF-8",   // encoding detection is Phase 4

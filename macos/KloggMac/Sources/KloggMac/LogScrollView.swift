@@ -215,6 +215,11 @@ final class LogScrollView: NSScrollView {
     /// font change live-applies.
     var rowHeight: CGFloat { docView.rowHeight }
 
+    /// Point size of the resolved log font (changes with the font-size preference).
+    /// Exposed so the headless harness can prove a font zoom live-applies even when
+    /// integer row-height quantization hides the change.
+    var fontPointSize: CGFloat { docView.logFont.pointSize }
+
     /// The effective line-number gutter width: the gutter's computed width when the
     /// line-number preference for this view's mode is ON, otherwise 0 (gutter hidden).
     /// Lets the harness assert the gutter shows/hides as the preference toggles.
@@ -1107,12 +1112,28 @@ final class LogDocumentView: NSView {
 
     // MARK: - Keyboard events
 
+    /// Ctrl+wheel zooms the log font, mirroring klogg's AbstractLogView::wheelEvent
+    /// (abstractlogview.cpp:939 → changeFontSize). All other wheel events scroll as usual.
+    override func scrollWheel(with event: NSEvent) {
+        if event.modifierFlags.contains(.control) {
+            let dy = event.scrollingDeltaY
+            if dy != 0 {
+                AppPreferences.shared.changeFontSize(increase: dy > 0)
+            }
+            return
+        }
+        super.scrollWheel(with: event)
+    }
+
     override func keyDown(with event: NSEvent) {
-        // Let NSResponder handle Cmd+A / Cmd+C.
+        // Cmd+'+'/'-'/'0' zoom the log font (macOS convention; klogg uses Ctrl+wheel).
         if event.modifierFlags.contains(.command) {
             switch event.charactersIgnoringModifiers {
             case "a": selectAll(self)
             case "c": copy(self)
+            case "+", "=": AppPreferences.shared.changeFontSize(increase: true)
+            case "-", "_": AppPreferences.shared.changeFontSize(increase: false)
+            case "0": AppPreferences.shared.fontSize = 12
             default:  super.keyDown(with: event)
             }
             return
