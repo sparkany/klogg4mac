@@ -81,6 +81,28 @@ final class AppPreferences {
         set { set("defaultView.searchAutoRefresh", b: newValue) }
     }
 
+    /// Inverse-match toggle (klogg CrawlerWidgetContext::inverseRegexp / inverseButton_).
+    /// When ON the filtered view shows NON-matching lines.
+    var searchInverse: Bool {
+        get { bool("defaultView.searchInverse", default: false) }
+        set { set("defaultView.searchInverse", b: newValue) }
+    }
+
+    /// Boolean-combination toggle (klogg booleanButton_ / useBooleanCombination).
+    /// When ON the search pattern is parsed as a logical expression
+    /// ("foo and not(bar)", quoted sub-patterns).
+    var searchBoolean: Bool {
+        get { bool("defaultView.searchBoolean", default: false) }
+        set { set("defaultView.searchBoolean", b: newValue) }
+    }
+
+    /// Regular-expression toggle (klogg useRegexpButton_ / useRegexp). When OFF the
+    /// pattern is treated as plain (fixed-string) text.
+    var searchUseRegex: Bool {
+        get { bool("defaultView.searchUseRegex", default: false) }
+        set { set("defaultView.searchUseRegex", b: newValue) }
+    }
+
     var autoRunSearch: Bool {
         get { bool("regexpType.autoRunSearch", default: false) }
         set { set("regexpType.autoRunSearch", b: newValue) }

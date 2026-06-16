@@ -50,6 +50,12 @@ struct LogViewContextActions {
     var sendToScratchpad: ((_ text: String) -> Void)?
     /// Replace the scratchpad with the selection.
     var replaceScratchpad: ((_ text: String) -> Void)?
+    /// Set the search-range START to the selected source line (klogg "Set search start").
+    var setSearchStart: ((_ line: Int) -> Void)?
+    /// Set the search-range END to the selected source line (klogg "Set search end").
+    var setSearchEnd: ((_ line: Int) -> Void)?
+    /// Clear the search-range limits (klogg "Clear search limits").
+    var clearSearchLimits: (() -> Void)?
 }
 
 /// Drop-in replacement for NSScrollView that hosts the log document view,
@@ -252,6 +258,14 @@ final class LogScrollView: NSScrollView {
         docView.needsDisplay = true
     }
 
+    /// Set the active search-range limits (klogg AbstractLogView::setSearchLimits). Lines
+    /// outside [start, end) are dimmed to show they're excluded from the search. Pass
+    /// start=0, end=Int.max to clear (whole file searched, nothing dimmed).
+    func setSearchLimitLines(start: Int, end: Int) {
+        docView.setSearchLimitLines(start: start, end: end)
+        docView.needsDisplay = true
+    }
+
     /// Called after a file loads or a search completes.
     /// Pass `lineCount` explicitly so the filtered view can pass match count.
     func reloadFromEngine(lineCount: Int? = nil) {
@@ -405,6 +419,28 @@ final class LogDocumentView: NSView {
         searchMatchRegex = LogDocumentView.compile(pattern: pattern,
                                                    caseInsensitive: caseInsensitive,
                                                    isRegex: isRegex)
+    }
+
+    /// Active search-range limits (klogg searchStart_ / searchEnd_). Lines with index
+    /// < start or >= end are dimmed. Defaults span the whole file (no dimming).
+    private(set) var searchLimitStart = 0
+    private(set) var searchLimitEnd = Int.max
+    /// Wash painted over lines outside the active search range (klogg dims them).
+    private let searchLimitDim = NSColor.gray.withAlphaComponent(0.20)
+
+    /// Set the search-range limits and repaint. start=0,end=Int.max ⇒ no dimming.
+    func setSearchLimitLines(start: Int, end: Int) {
+        searchLimitStart = max(0, start)
+        searchLimitEnd = end
+    }
+
+    /// True when an explicit (non-whole-file) search range is active.
+    var hasSearchLimit: Bool { searchLimitStart > 0 || searchLimitEnd != Int.max }
+
+    /// Whether source line `line` is OUTSIDE the active search range (so it's dimmed).
+    func isLineOutsideSearchLimit(_ line: Int) -> Bool {
+        guard hasSearchLimit else { return false }
+        return line < searchLimitStart || line >= searchLimitEnd
     }
 
     /// Set/clear the QuickFind highlight pattern (independent of search highlight).
@@ -715,6 +751,13 @@ final class LogDocumentView: NSView {
 
             if isSelected {
                 NSColor.selectedTextBackgroundColor.setFill()
+                NSRect(x: 0, y: y, width: bounds.width, height: rowHeight).fill()
+            }
+
+            // Search-range dimming (klogg searchStart_/searchEnd_): in the main view, a
+            // line outside the active range is washed grey to show it won't be searched.
+            if mode == .main && isLineOutsideSearchLimit(row) {
+                searchLimitDim.setFill()
                 NSRect(x: 0, y: y, width: bounds.width, height: rowHeight).fill()
             }
 
@@ -1216,6 +1259,15 @@ final class LogDocumentView: NSView {
     @objc private func ctxSendScratchpad(_ sender: Any?)    { contextActions?.sendToScratchpad?(selectionText) }
     @objc private func ctxReplaceScratchpad(_ sender: Any?) { contextActions?.replaceScratchpad?(selectionText) }
     @objc private func ctxSaveToFile(_ sender: Any?)        { saveSelectionToFile() }
+    @objc private func ctxSetSearchStart(_ sender: Any?) {
+        guard let line = selectedSourceLines.first else { return }
+        contextActions?.setSearchStart?(line)
+    }
+    @objc private func ctxSetSearchEnd(_ sender: Any?) {
+        guard let line = selectedSourceLines.last else { return }
+        contextActions?.setSearchEnd?(line)
+    }
+    @objc private func ctxClearSearchLimits(_ sender: Any?) { contextActions?.clearSearchLimits?() }
 
     /// Save the current selection to a file via an NSSavePanel (klogg "Save selected
     /// to file"). Headless-safe: only runs when a window is present.
@@ -1317,6 +1369,28 @@ final class LogDocumentView: NSView {
             if contextActions?.excludeFromSearch != nil {
                 let it = NSMenuItem(title: "Exclude from search", action: #selector(ctxExcludeSearch(_:)), keyEquivalent: "")
                 it.target = self; it.isEnabled = hasSel; menu.addItem(it)
+            }
+        }
+
+        // Search-range limits (klogg: Set search start / Set search end / Clear search
+        // limits). Enabled when a line is selected; "Set search start" anchors the range
+        // at the clicked source line, "Set search end" one past it.
+        if contextActions?.setSearchStart != nil
+            || contextActions?.setSearchEnd != nil
+            || contextActions?.clearSearchLimits != nil {
+            menu.addItem(.separator())
+            let hasLine = !selectedSourceLines.isEmpty
+            if contextActions?.setSearchStart != nil {
+                let it = NSMenuItem(title: "Set search start", action: #selector(ctxSetSearchStart(_:)), keyEquivalent: "")
+                it.target = self; it.isEnabled = hasLine; menu.addItem(it)
+            }
+            if contextActions?.setSearchEnd != nil {
+                let it = NSMenuItem(title: "Set search end", action: #selector(ctxSetSearchEnd(_:)), keyEquivalent: "")
+                it.target = self; it.isEnabled = hasLine; menu.addItem(it)
+            }
+            if contextActions?.clearSearchLimits != nil {
+                let it = NSMenuItem(title: "Clear search limits", action: #selector(ctxClearSearchLimits(_:)), keyEquivalent: "")
+                it.target = self; menu.addItem(it)
             }
         }
 

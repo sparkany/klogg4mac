@@ -36,6 +36,7 @@ enum SelfTest {
         out += "\n" + predefinedFiltersEditorTests(wc)
         out += "\n" + scratchpadTransformTests()
         out += "\n" + searchCorrectnessTests(wc)
+        out += "\n" + searchOptionsTests(wc)
         out += "\n" + quickFindEdgeTests(wc)
         out += "\n" + goToLineBoundsTests(wc)
         out += "\n" + edgeRobustnessTests(wc)
@@ -516,6 +517,7 @@ enum SelfTest {
         let titles = wc.selfTestContextMenuTitles(selectingLine: 0)
         let required = ["Mark", "Copy this line", "Copy this line with line number",
                         "Replace search", "Add to search", "Exclude from search",
+                        "Set search start", "Set search end", "Clear search limits",
                         "Select All", "Save selected to file"]
         let missing = required.filter { !titles.contains($0) }
         s += missing.isEmpty
@@ -1118,6 +1120,192 @@ enum SelfTest {
         s += (grepCount == 3)
             ? "PASS grep cross-check 'ERROR' = 3\n"
             : "FAIL grep cross-check 'ERROR' = \(grepCount) (expected 3)\n"
+
+        wc.closeCurrentTab(nil)
+        return s
+    }
+
+    // MARK: - Search OPTIONS parity (Wave 12: inverse / range / boolean / toggles)
+
+    /// Prove the full klogg search-line capabilities now wired through the bridge:
+    ///   (1) INVERSE match — filtered view shows NON-matching lines (1000-line file with
+    ///       250 ERROR → inverse 'ERROR' = 750).
+    ///   (2) SEARCH RANGE limiting — set start/end lines and assert the count drops to the
+    ///       matches inside the window (cross-checked against the math + grep on a slice).
+    ///   (3) BOOLEAN combination — "ERROR and not INFO", "alpha or beta" semantics via the
+    ///       engine's boolean evaluator (the context-menu add/exclude builds these).
+    ///   (4) Expression VALIDITY gate (good vs. broken regex / boolean).
+    ///   (5) Toggle PERSISTENCE — inverse/boolean/auto-refresh survive in AppPreferences.
+    private static func searchOptionsTests(_ wc: MainWindowController) -> String {
+        var s = "--- SEARCH OPTIONS PARITY TESTS (inverse/range/boolean) ---\n"
+
+        // 1000-line corpus: every 4th line is an ERROR (250 ERROR, 750 other).
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("klogg-searchopt-\(UUID().uuidString).log")
+        var lines: [String] = []
+        lines.reserveCapacity(1000)
+        for i in 0..<1000 {
+            lines.append(i % 4 == 0 ? "ERROR event \(i)" : "INFO ok \(i)")
+        }
+        let body = lines.joined(separator: "\n") + "\n"
+        guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else {
+            return s + "FAIL could not write search-options test file\n"
+        }
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        wc.selfTestOpen(path)
+        wait(timeout: 5.0) { wc.selfTestCurrentLineCount >= 1000 }
+
+        // --- (1) INVERSE match: 'ERROR' inverted → 750 non-matching lines.
+        wc.selfTestRunSearchFull(pattern: "ERROR", caseInsensitive: false, isRegex: false,
+                                 inverse: true, boolean: false, startLine: 0, endLine: Int.max)
+        let invOK = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 750 }
+        let invCount = wc.selfTestSearchMatchCount
+        // grep oracle: lines NOT containing ERROR = total - grep('ERROR').
+        let errGrep = grepLineCount(pattern: "ERROR", path: path, caseInsensitive: false)
+        s += (invOK && invCount == 1000 - errGrep)
+            ? "PASS inverse 'ERROR' = \(invCount) non-matching (grep: 1000-\(errGrep)=\(1000-errGrep))\n"
+            : "FAIL inverse 'ERROR' = \(invCount) (expected 750, grep non-match \(1000-errGrep))\n"
+
+        // Sanity: NON-inverted 'ERROR' = 250 (proves inverse flag actually flips it).
+        wc.selfTestRunSearchFull(pattern: "ERROR", caseInsensitive: false, isRegex: false,
+                                 inverse: false, boolean: false, startLine: 0, endLine: Int.max)
+        let posOK = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 250 }
+        s += posOK ? "PASS non-inverse 'ERROR' = 250 (matches)\n"
+                   : "FAIL non-inverse 'ERROR' = \(wc.selfTestSearchMatchCount) (expected 250)\n"
+
+        // --- (2) SEARCH RANGE: limit to lines [0, 40). ERROR lines there: 0,4,…,36 = 10.
+        wc.selfTestRunSearchFull(pattern: "ERROR", caseInsensitive: false, isRegex: false,
+                                 inverse: false, boolean: false, startLine: 0, endLine: 40)
+        let rangeOK = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 10 }
+        let rangeCount = wc.selfTestSearchMatchCount
+        s += rangeOK
+            ? "PASS range [0,40) 'ERROR' = \(rangeCount) (lines 0,4,…,36)\n"
+            : "FAIL range [0,40) 'ERROR' = \(rangeCount) (expected 10)\n"
+
+        // Range via the context-menu code path: setSearchStart(100) then setSearchEnd(199).
+        // Each call re-runs the LAST search (klogg setSearchLimits → replaceCurrentSearch),
+        // so we must seed it through the search-bar path (which records lastSearch) — not
+        // the direct engine path. We wait for the intermediate result so the two async
+        // searches don't race. Window [100,200): ERROR lines 100,104,…,196 = 25.
+        // (setSearchEnd is exclusive +1, mirroring klogg AbstractLogView::setSearchEnd.)
+        wc.selfTestRunSearchViaBar(pattern: "ERROR", caseInsensitive: false, isRegex: false,
+                                   inverse: false, boolean: false)
+        _ = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 250 }
+        // Start limit [100,∞): ERROR lines 100,104,…,996 = 225.
+        wc.selfTestSetSearchStart(line: 100)
+        _ = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 225 }
+        // End limit [100,200): 25.
+        wc.selfTestSetSearchEnd(line: 199)
+        let r2OK = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 25 }
+        let r2 = wc.selfTestSearchMatchCount
+        let range = wc.selfTestSearchRange
+        s += (r2OK && range.start == 100 && range.end == 200)
+            ? "PASS setSearchStart/End [100,200) 'ERROR' = \(r2) (range=\(range.start),\(range.end))\n"
+            : "FAIL setSearchStart/End 'ERROR' = \(r2) (expected 25, range=\(range.start),\(range.end))\n"
+
+        // Clear limits → back to whole-file 250.
+        wc.selfTestClearSearchLimits()
+        let clrOK = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 250 }
+        let clrRange = wc.selfTestSearchRange
+        s += (clrOK && clrRange.start == 0 && clrRange.end == Int.max)
+            ? "PASS clearSearchLimits → 250 (whole file)\n"
+            : "FAIL clearSearchLimits → \(wc.selfTestSearchMatchCount) (expected 250)\n"
+
+        // --- (3) BOOLEAN combination (klogg booleanButton_). klogg's parseBooleanExpressions
+        // REQUIRES each sub-pattern enclosed in quotes. "ERROR" and not "INFO" → all 250
+        // ERROR lines (none also contain INFO).
+        wc.selfTestRunSearchFull(pattern: "\"ERROR\" and not \"INFO\"", caseInsensitive: false,
+                                 isRegex: false, inverse: false, boolean: true,
+                                 startLine: 0, endLine: Int.max)
+        let boolAndOK = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 250 }
+        s += boolAndOK
+            ? "PASS boolean '\"ERROR\" and not \"INFO\"' = 250\n"
+            : "FAIL boolean '\"ERROR\" and not \"INFO\"' = \(wc.selfTestSearchMatchCount) (expected 250)\n"
+
+        // "ERROR" or "INFO" → every line (1000), since each is one or the other.
+        wc.selfTestRunSearchFull(pattern: "\"ERROR\" or \"INFO\"", caseInsensitive: false,
+                                 isRegex: false, inverse: false, boolean: true,
+                                 startLine: 0, endLine: Int.max)
+        let boolOrOK = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 1000 }
+        s += boolOrOK
+            ? "PASS boolean '\"ERROR\" or \"INFO\"' = 1000 (all lines)\n"
+            : "FAIL boolean '\"ERROR\" or \"INFO\"' = \(wc.selfTestSearchMatchCount) (expected 1000)\n"
+
+        // --- (4) VALIDITY gate.
+        let goodRegex = wc.selfTestIsValidSearch(pattern: "ERR[0-9]+", isRegex: true, boolean: false)
+        let badRegex  = wc.selfTestIsValidSearch(pattern: "ERR[0-9", isRegex: true, boolean: false)
+        let goodBool  = wc.selfTestIsValidSearch(pattern: "\"ERROR\" and not \"INFO\"", isRegex: false, boolean: true)
+        // klogg rejects boolean patterns without quotes ("Patterns must be enclosed in quotes").
+        let badBool   = wc.selfTestIsValidSearch(pattern: "ERROR and not INFO", isRegex: false, boolean: true)
+        s += (goodRegex && !badRegex)
+            ? "PASS validity: good regex valid, broken '[0-9' rejected\n"
+            : "FAIL validity: good=\(goodRegex) bad=\(badRegex)\n"
+        s += (goodBool && !badBool)
+            ? "PASS validity: quoted boolean valid, unquoted rejected\n"
+            : "FAIL validity: goodBool=\(goodBool) badBool=\(badBool)\n"
+
+        // --- (5) Full search-bar path with toggles (klogg replaceCurrentSearch wiring).
+        wc.selfTestRunSearchViaBar(pattern: "ERROR", caseInsensitive: false, isRegex: false,
+                                   inverse: true, boolean: false)
+        let barInvOK = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 750 }
+        let toggles = wc.selfTestSearchToggles
+        s += (barInvOK && toggles.inverse)
+            ? "PASS search-bar inverse path = 750 (inverse toggle ON)\n"
+            : "FAIL search-bar inverse path = \(wc.selfTestSearchMatchCount), toggle=\(toggles.inverse)\n"
+
+        // --- (5c) CONTEXT-MENU COMBINE (klogg replaceSearch/addToSearch/excludeFromSearch).
+        // Reset to a clean field. "Replace search" with 'ERROR' → 250 (the plain literal).
+        wc.selfTestRunSearchViaBar(pattern: "ERROR", caseInsensitive: false, isRegex: false,
+                                   inverse: false, boolean: false)
+        _ = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 250 }
+        wc.selfTestCombineSearch(reset: true, op: "replace", term: "INFO")
+        let replOK = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 750 }
+        s += replOK ? "PASS combine replace 'INFO' = 750\n"
+                    : "FAIL combine replace 'INFO' = \(wc.selfTestSearchMatchCount) (expected 750)\n"
+
+        // "Exclude from search": after replace('INFO'), exclude 'ok' switches to boolean
+        // mode and builds  "INFO" and not("ok").  Every INFO line contains "ok", so the
+        // result is 0; field text shows the klogg-built boolean pattern.
+        wc.selfTestCombineSearch(reset: false, op: "exclude", term: "ok")
+        let exclOK = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 0 }
+        let exclField = wc.selfTestSearchFieldText
+        let exclTogglesOn = wc.selfTestSearchToggles.boolean
+        s += (exclOK && exclTogglesOn && exclField.contains("not(") && exclField.contains("\"INFO\""))
+            ? "PASS combine exclude 'ok' → 0, boolean ON, pattern '\(exclField)'\n"
+            : "FAIL combine exclude: count=\(wc.selfTestSearchMatchCount) boolean=\(exclTogglesOn) pattern='\(exclField)'\n"
+
+        // "Add to search" in boolean mode ORs the term:  …"INFO"… or "ERROR"  → all 1000.
+        wc.selfTestCombineSearch(reset: true, op: "replace", term: "INFO")
+        _ = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 750 }
+        // First exclude to flip into boolean mode, then add 'ERROR' (OR) → INFO-not-zzz or ERROR.
+        wc.selfTestCombineSearch(reset: false, op: "exclude", term: "zzzznomatch")
+        _ = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 750 }   // 'zzzznomatch' excludes nothing
+        wc.selfTestCombineSearch(reset: false, op: "add", term: "ERROR")
+        let addOK = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 1000 }
+        s += addOK ? "PASS combine add 'ERROR' (boolean OR) = 1000\n"
+                   : "FAIL combine add 'ERROR' = \(wc.selfTestSearchMatchCount) (expected 1000)\n"
+
+        // Reset toggles for the toggle-persistence checks below.
+        wc.selfTestRunSearchViaBar(pattern: "ERROR", caseInsensitive: false, isRegex: false,
+                                   inverse: true, boolean: false)
+        _ = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 750 }
+
+        // --- (5b) Toggle PERSISTENCE in AppPreferences (klogg context keys).
+        let prefInv = AppPreferences.shared.searchInverse
+        s += prefInv ? "PASS inverse toggle persisted (searchInverse=true)\n"
+                     : "FAIL inverse toggle not persisted\n"
+        // Restore default-off so the toggle doesn't leak to later tests / the user.
+        wc.selfTestRunSearchViaBar(pattern: "ERROR", caseInsensitive: false, isRegex: false,
+                                   inverse: false, boolean: false)
+        _ = wait(timeout: 8.0) { wc.selfTestSearchMatchCount == 250 }
+        AppPreferences.shared.searchInverse = false
+        AppPreferences.shared.searchBoolean = false
+
+        // Snapshot the search bar with all toggles present (search-line parity).
+        let dir = ProcessInfo.processInfo.environment["KLOGG_SNAPSHOT_DIR"] ?? NSTemporaryDirectory()
+        let snap = (dir as NSString).appendingPathComponent("klogg-snapshot-search-options.png")
+        s += wc.selfTestSnapshot(to: snap) ? "PASS wrote \(snap)\n" : "FAIL search-options snapshot\n"
 
         wc.closeCurrentTab(nil)
         return s

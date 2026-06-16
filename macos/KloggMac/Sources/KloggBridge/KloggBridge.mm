@@ -32,6 +32,7 @@
 #include <QThread>
 #include <QObject>
 #include <QString>
+#include <QRegularExpression>
 #include <QTextCodec>
 
 // klogg engine
@@ -330,27 +331,121 @@ struct KloggEngineImpl {
 - (void)searchWithPattern:(NSString*)pattern
           caseInsensitive:(BOOL)caseInsensitive
                     regex:(BOOL)isRegex {
-    if (!_impl) return;
+    // Convenience: simple search, not inverted, not boolean, over the whole file.
+    [self searchWithPattern:pattern
+            caseInsensitive:caseInsensitive
+                      regex:isRegex
+                    inverse:NO
+                    boolean:NO
+                  startLine:0
+                    endLine:NSUIntegerMax];
+}
 
-    // Build a RegularExpressionPattern.
-    // isCaseSensitive = !caseInsensitive
-    // isPlainText     = !isRegex   (plain-text = fixed-string search)
-    // isExclude / isBoolean / isPrefilter = false for simple searches
+/// Construct the RegularExpressionPattern mirroring klogg's replaceCurrentSearch:
+///   RegularExpressionPattern( searchText, matchCaseButton_->isChecked(),
+///       inverseButton_->isChecked(), booleanButton_->isChecked(),
+///       !useRegexpButton_->isChecked() )
+/// i.e. ctor arg order is (expression, isCaseSensitive, inverse, boolean, plainText).
+static RegularExpressionPattern makePattern(NSString* pattern, BOOL caseInsensitive,
+                                            BOOL isRegex, BOOL inverse, BOOL boolean) {
     const bool sensitive = !static_cast<bool>(caseInsensitive);
     const bool plainText = !static_cast<bool>(isRegex);
     const QString qpat   = QString::fromNSString(pattern);
-    RegularExpressionPattern regExp(qpat, sensitive, /*inverse*/false,
-                                    /*boolean*/false, plainText);
+    return RegularExpressionPattern(qpat, sensitive, static_cast<bool>(inverse),
+                                    static_cast<bool>(boolean), plainText);
+}
+
+- (void)searchWithPattern:(NSString*)pattern
+          caseInsensitive:(BOOL)caseInsensitive
+                    regex:(BOOL)isRegex
+                  inverse:(BOOL)inverse
+                  boolean:(BOOL)boolean
+                startLine:(NSUInteger)startLine
+                  endLine:(NSUInteger)endLine {
+    if (!_impl) return;
+
+    RegularExpressionPattern regExp =
+        makePattern(pattern, caseInsensitive, isRegex, inverse, boolean);
 
     KloggEngineImpl* impl = _impl;
+    const NSUInteger start = startLine;
+    const NSUInteger end   = endLine;
     QMetaObject::invokeMethod(
         impl->context.get(),
-        [impl, regExp]() {
+        [impl, regExp, start, end]() {
+            // Clamp the range to the file: end == NSUIntegerMax (or beyond EOF) means
+            // "to end of file"; an empty/invalid range degenerates to a whole-file search
+            // so the UI never silently returns nothing for a bad limit.
+            const uint64_t total = impl->logData->getNbLine().get();
+            uint64_t s = static_cast<uint64_t>(start);
+            uint64_t e = (end == static_cast<NSUInteger>(NSUIntegerMax))
+                             ? total
+                             : static_cast<uint64_t>(end);
+            if (e > total) e = total;
+            if (s > total) s = total;
             // runSearch is synchronous up to the point of dispatching the worker;
             // searchProgressed signal drives all progress/completion callbacks.
-            impl->filteredData->runSearch(regExp);
+            if (s == 0 && e == total) {
+                impl->filteredData->runSearch(regExp);
+            } else {
+                impl->filteredData->runSearch(
+                    regExp,
+                    LineNumber(static_cast<LineNumber::UnderlyingType>(s)),
+                    LineNumber(static_cast<LineNumber::UnderlyingType>(e)));
+            }
         },
         Qt::QueuedConnection);
+}
+
+- (BOOL)isValidSearchPattern:(NSString*)pattern
+                       regex:(BOOL)isRegex
+                     boolean:(BOOL)boolean {
+    // An empty pattern is "valid" in the sense klogg treats it (clears the search).
+    if (pattern.length == 0) return YES;
+
+    // We validate with Qt's QRegularExpression rather than constructing the engine's
+    // full RegularExpression: the latter compiles a Hyperscan database, which is unsafe
+    // to build on the Qt thread while a runSearch may be dispatching (it shares the same
+    // worker machinery) and is far heavier than a validity check needs. QRegularExpression
+    // gives the same syntax verdict for the regex grammar klogg uses.
+    const QString qpat = QString::fromNSString(pattern);
+
+    if (boolean) {
+        // Boolean mode (klogg parseBooleanExpressions): sub-patterns MUST be enclosed in
+        // quotes ("foo" and not("bar")) — klogg throws otherwise. Mirror that rule and
+        // validate every quoted sub-pattern as a regex. The boolean grammar itself
+        // (and/or/not/parentheses) is checked structurally by the engine; we catch the
+        // common syntax errors (no quotes / unbalanced quotes / bad sub-regex) cheaply.
+        if (!qpat.contains(QLatin1Char('"'))) return NO;   // klogg: "Patterns must be enclosed in quotes"
+        int quoteCount = 0;
+        QString current;
+        bool inQuote = false;
+        bool ok = true;
+        for (int i = 0; i < qpat.length(); ++i) {
+            const QChar c = qpat.at(i);
+            if (c == QLatin1Char('"')) {
+                quoteCount++;
+                if (inQuote) {
+                    QRegularExpression sub(current);
+                    if (!sub.isValid()) { ok = false; break; }
+                    current.clear();
+                }
+                inQuote = !inQuote;
+            } else if (inQuote) {
+                current.append(c);
+            }
+        }
+        if ((quoteCount % 2) != 0) ok = false;   // unbalanced quotes
+        return ok ? YES : NO;
+    }
+
+    if (!isRegex) {
+        // Plain text: always a valid fixed-string search.
+        return YES;
+    }
+
+    QRegularExpression re(qpat);
+    return re.isValid() ? YES : NO;
 }
 
 // MARK: - Filtered data access (valid after searchFinished)

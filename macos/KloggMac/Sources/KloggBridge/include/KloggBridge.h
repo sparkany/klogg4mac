@@ -81,9 +81,38 @@ typedef NS_ENUM(NSInteger, KloggFileChange) {
 - (NSArray<NSString *> *)linesInRange:(NSRange)range expandTabs:(BOOL)expand;
 
 /// Start a search; results feed a filtered view. Progress/completion via delegate.
+/// (Convenience: forwards to the full method below with inverse=NO, boolean=NO, and
+/// the full line range.)
 - (void)searchWithPattern:(NSString *)pattern
               caseInsensitive:(BOOL)caseInsensitive
                         regex:(BOOL)isRegex;
+
+/// Full klogg search (mirrors CrawlerWidget::replaceCurrentSearch →
+/// LogFilteredData::runSearch(regExp, startLine, endLine)).
+///
+/// - inverse:   show NON-matching lines (klogg inverseButton_ / RegularExpressionPattern.isExclude).
+/// - boolean:   parse `pattern` as a logical combination — "foo and not(bar)", quoted
+///              sub-patterns — instead of a single regex (klogg booleanButton_).
+/// - startLine: first 0-based source line to search (inclusive).
+/// - endLine:   one past the last source line to search (exclusive). Pass
+///              NSUIntegerMax to mean "to end of file".
+///
+/// Progress/completion arrive via the delegate exactly as for the convenience method.
+- (void)searchWithPattern:(NSString *)pattern
+          caseInsensitive:(BOOL)caseInsensitive
+                    regex:(BOOL)isRegex
+                  inverse:(BOOL)inverse
+                  boolean:(BOOL)boolean
+                startLine:(NSUInteger)startLine
+                  endLine:(NSUInteger)endLine;
+
+/// Whether `pattern` (with the given flags) compiles to a valid search expression.
+/// Mirrors klogg's RegularExpression::isValid() gate in replaceCurrentSearch — lets the
+/// UI report "Error in expression" instead of silently running an empty search.
+/// Synchronous; safe to call on the main thread.
+- (BOOL)isValidSearchPattern:(NSString *)pattern
+                       regex:(BOOL)isRegex
+                     boolean:(BOOL)boolean;
 
 // MARK: - Filtered data access (valid after searchFinished)
 

@@ -115,43 +115,22 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     /// regex against our engine (replace=literal; add=alternation; exclude=lookahead).
     private func makeContextActions() -> LogViewContextActions {
         var actions = LogViewContextActions()
-        actions.replaceSearch = { [weak self] text in
-            guard let self = self, !text.isEmpty else { return }
-            // Replace: search for the literal selection (plain, not regex).
-            self.searchBar.setSearchAndRun(pattern: text, isRegex: false,
-                                           caseInsensitive: AppPreferences.shared.searchIgnoreCase)
+        // Replace / Add / Exclude mirror klogg's CrawlerWidget exactly (crawlerwidget.cpp
+        // replaceSearch / addToSearch / excludeFromSearch). klogg combines patterns using
+        // its boolean-expression layer ("foo or bar", "foo and not(bar)") or regex
+        // alternation ("foo|bar"), driven by the live regex/boolean toggle states — NOT
+        // ad-hoc lookahead. The engine's RegularExpression understands these natively.
+        actions.replaceSearch     = { [weak self] text in self?.replaceSearch(text) }
+        actions.addToSearch       = { [weak self] text in self?.addToSearch(text) }
+        actions.excludeFromSearch = { [weak self] text in self?.excludeFromSearch(text) }
+        actions.setSearchStart = { [weak self] line in
+            self?.setSearchStart(line: line)
         }
-        actions.addToSearch = { [weak self] text in
-            guard let self = self, !text.isEmpty else { return }
-            // Add: OR the new term with the existing pattern (regex alternation).
-            let current = self.searchBar.currentPattern
-            let newEsc = NSRegularExpression.escapedPattern(for: text)
-            let combined: String
-            if current.isEmpty {
-                combined = newEsc
-            } else {
-                let curExpr = self.searchBar.isRegexMode
-                    ? current : NSRegularExpression.escapedPattern(for: current)
-                combined = "(\(curExpr))|(\(newEsc))"
-            }
-            self.searchBar.setSearchAndRun(pattern: combined, isRegex: true,
-                                           caseInsensitive: AppPreferences.shared.searchIgnoreCase)
+        actions.setSearchEnd = { [weak self] line in
+            self?.setSearchEnd(line: line)
         }
-        actions.excludeFromSearch = { [weak self] text in
-            guard let self = self, !text.isEmpty else { return }
-            // Exclude: require the current pattern AND not the new term (lookahead).
-            let current = self.searchBar.currentPattern
-            let newEsc = NSRegularExpression.escapedPattern(for: text)
-            let pattern: String
-            if current.isEmpty {
-                pattern = "^(?!.*\(newEsc)).*$"
-            } else {
-                let curExpr = self.searchBar.isRegexMode
-                    ? current : NSRegularExpression.escapedPattern(for: current)
-                pattern = "^(?=.*(?:\(curExpr)))(?!.*\(newEsc)).*$"
-            }
-            self.searchBar.setSearchAndRun(pattern: pattern, isRegex: true,
-                                           caseInsensitive: AppPreferences.shared.searchIgnoreCase)
+        actions.clearSearchLimits = { [weak self] in
+            self?.clearSearchLimits()
         }
         actions.sendToScratchpad = { [weak self] text in
             guard let self = self, !text.isEmpty else { return }
@@ -271,14 +250,22 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         }
 
         // Wire search bar actions.
-        searchBar.onSearch = { [weak self] pattern, caseInsensitive, isRegex in
+        searchBar.onSearch = { [weak self] pattern, caseInsensitive, isRegex, inverse, boolean in
             self?.startSearch(pattern: pattern,
                               caseInsensitive: caseInsensitive,
-                              isRegex: isRegex)
+                              isRegex: isRegex,
+                              inverse: inverse,
+                              boolean: boolean)
         }
         searchBar.onCancel = { [weak self] in
             self?.engine.cancel()
         }
+        // Auto-refresh toggle (klogg searchRefreshButton_): remember the state so a
+        // file-growth re-index re-runs the search.
+        searchBar.onAutoRefreshChanged = { [weak self] on in
+            self?.isSearchAutoRefresh = on
+        }
+        isSearchAutoRefresh = AppPreferences.shared.searchAutoRefresh
         // Filtered-view visibility mode (klogg visibilityBox_): recompute what the
         // lower pane shows (Matches / Marks / Marks and matches).
         searchBar.onVisibilityChanged = { [weak self] _ in
@@ -388,24 +375,176 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
 
     // MARK: - Search
 
-    private func startSearch(pattern: String, caseInsensitive: Bool, isRegex: Bool) {
+    private func startSearch(pattern: String, caseInsensitive: Bool, isRegex: Bool,
+                             inverse: Bool = false, boolean: Bool = false) {
+        // Validate the expression first (klogg replaceCurrentSearch isValid() gate). On
+        // an invalid pattern, surface the error in the label instead of running.
+        if !engine.isValidSearchPattern(pattern, regex: isRegex, boolean: boolean) {
+            searchBar.showProgress(false)
+            searchBar.showSearchError()
+            return
+        }
         searchBar.showProgress(true)
-        // Remember the active search so it can be re-applied as the main-view
-        // highlight wash when the search finishes (honours highlightSearchInMain).
-        lastSearch = (pattern, caseInsensitive, isRegex)
+        // Remember the active search so it can be re-applied as the main-view highlight
+        // wash when the search finishes, and re-run on file growth (auto-refresh).
+        lastSearch = (pattern, caseInsensitive, isRegex, inverse, boolean)
         // Apply the main-view highlight immediately so hits are visible while the
-        // filtered index is still building.
+        // filtered index is still building. (Inverse hides nothing in the main view —
+        // it only changes which lines populate the filtered pane — so we still wash the
+        // literal matches there, matching klogg's logMainView_->setSearchPattern.)
         mainView.setSearchHighlight(pattern: pattern,
                                     caseInsensitive: caseInsensitive,
                                     isRegex: isRegex)
         engine.search(withPattern: pattern,
                       caseInsensitive: caseInsensitive,
-                      regex: isRegex)
+                      regex: isRegex,
+                      inverse: inverse,
+                      boolean: boolean,
+                      startLine: UInt(searchStartLine),
+                      endLine: searchEndLine == Int.max ? UInt.max : UInt(searchEndLine))
     }
 
     /// The pattern/options of the most recent search, kept so preference changes
-    /// (toggling highlightSearchInMain) can re-apply or clear the main-view wash.
-    private var lastSearch: (pattern: String, caseInsensitive: Bool, isRegex: Bool)?
+    /// (toggling highlightSearchInMain) can re-apply or clear the main-view wash, and
+    /// auto-refresh can re-run the same search after the file grows.
+    private var lastSearch: (pattern: String, caseInsensitive: Bool, isRegex: Bool,
+                             inverse: Bool, boolean: Bool)?
+
+    /// Auto-refresh state (klogg searchRefreshButton_ → searchState_.setAutorefresh).
+    /// When ON, a file-growth re-index re-runs the last search.
+    private var isSearchAutoRefresh = false
+
+    // MARK: - Search range limits (klogg searchStartLine_ / searchEndLine_)
+
+    /// First 0-based source line to search (inclusive). Default 0 = start of file.
+    private(set) var searchStartLine = 0
+    /// One past the last source line to search (exclusive). Int.max = end of file.
+    private(set) var searchEndLine = Int.max
+
+    /// Set the search start limit (klogg AbstractLogView::setSearchStart →
+    /// CrawlerWidget::setSearchLimits). Re-runs the current search if there is one.
+    func setSearchStart(line: Int) {
+        searchStartLine = max(0, line)
+        mainView.setSearchLimitLines(start: searchStartLine, end: searchEndLine)
+        filteredView.setSearchLimitLines(start: searchStartLine, end: searchEndLine)
+        rerunLastSearch()
+    }
+
+    /// Set the search end limit (klogg setSearchEnd: selected line + 1, exclusive).
+    func setSearchEnd(line: Int) {
+        searchEndLine = line + 1
+        mainView.setSearchLimitLines(start: searchStartLine, end: searchEndLine)
+        filteredView.setSearchLimitLines(start: searchStartLine, end: searchEndLine)
+        rerunLastSearch()
+    }
+
+    /// Clear the search-range limits (klogg clearSearchLimits → whole file).
+    func clearSearchLimits() {
+        searchStartLine = 0
+        searchEndLine = Int.max
+        mainView.setSearchLimitLines(start: 0, end: Int.max)
+        filteredView.setSearchLimitLines(start: 0, end: Int.max)
+        rerunLastSearch()
+    }
+
+    /// Re-run the last search with the current range/options (used after a range change
+    /// or a file-growth auto-refresh).
+    private func rerunLastSearch() {
+        guard let s = lastSearch else { return }
+        startSearch(pattern: s.pattern, caseInsensitive: s.caseInsensitive,
+                    isRegex: s.isRegex, inverse: s.inverse, boolean: s.boolean)
+    }
+
+    // MARK: - klogg pattern combination (crawlerwidget.cpp escapeSearchPattern/combinePatterns)
+
+    /// klogg escapeSearchPattern: escape the term for regex when regex-mode is on but the
+    /// term is meant literally, and quote it when boolean mode is on (so a multi-word
+    /// term is a single boolean sub-expression).
+    private func escapeSearchPattern(_ pattern: String) -> String {
+        var escaped = searchBar.isRegexMode
+            ? NSRegularExpression.escapedPattern(for: pattern)
+            : pattern
+        if searchBar.isBooleanMode {
+            // klogg escapeSearchPattern: escapedPattern.replace('"', "\"").prepend('"').append('"')
+            escaped = "\"" + escaped.replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        return escaped
+    }
+
+    /// klogg combinePatterns: join the existing pattern with a new one using " or "
+    /// (boolean mode) or "|" (regex mode), else just concatenate.
+    private func combinePatterns(_ current: String, _ newPattern: String) -> String {
+        var result = current
+        if !result.isEmpty {
+            if searchBar.isBooleanMode {
+                result += " or "
+            } else if searchBar.isRegexMode {
+                result += "|"
+            }
+        }
+        result += newPattern
+        return result
+    }
+
+    /// klogg setSearchPattern: load the combined pattern into the field and run it,
+    /// honouring the live regex/boolean/case toggle states.
+    private func runCombinedSearch(_ pattern: String) {
+        searchBar.setSearchAndRun(pattern: pattern,
+                                  isRegex: searchBar.isRegexMode,
+                                  caseInsensitive: AppPreferences.shared.searchIgnoreCase)
+    }
+
+    // The three context-menu search combinators, mirroring crawlerwidget.cpp 1:1.
+
+    /// klogg replaceSearch( s ): setSearchPattern( escapeSearchPattern( s ) ).
+    func replaceSearch(_ text: String) {
+        guard !text.isEmpty else { return }
+        runCombinedSearch(escapeSearchPattern(text))
+    }
+
+    /// klogg addToSearch( s ): combinePatterns( currentText, escapeSearchPattern( s ) ).
+    func addToSearch(_ text: String) {
+        guard !text.isEmpty else { return }
+        let combined = combinePatterns(searchBar.currentPattern, escapeSearchPattern(text))
+        runCombinedSearch(combined)
+    }
+
+    /// klogg excludeFromSearch( s ): if not already boolean, quote the current pattern;
+    /// switch ON boolean mode; append " and not(escaped)".
+    func excludeFromSearch(_ text: String) {
+        guard !text.isEmpty else { return }
+        var current = searchBar.currentPattern
+        let wasBoolean = searchBar.isBooleanMode
+        if !wasBoolean && !current.isEmpty {
+            // klogg: current.replace('"', "\"").prepend('"').append('"').
+            current = "\"" + current.replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        searchBar.setBooleanMode(true)
+        let newPattern = escapeSearchPattern(text)
+        if !current.isEmpty { current += " and " }
+        current += "not(" + newPattern + ")"
+        runCombinedSearch(current)
+    }
+
+    /// Headless: clear the search field + reset toggles, then run add/exclude/replace by
+    /// term (drives the SAME named methods the context menu calls). Used by SelfTest to
+    /// assert combined-search counts.
+    func selfTestCombineSearch(reset: Bool, op: String, term: String) {
+        if reset {
+            searchBar.setBooleanMode(false)
+            searchBar.setSearchAndRun(pattern: "", isRegex: false, caseInsensitive: false)
+            searchBar.clearFieldForTest()
+        }
+        switch op {
+        case "replace": replaceSearch(term)
+        case "add":     addToSearch(term)
+        case "exclude": excludeFromSearch(term)
+        default: break
+        }
+    }
+
+    /// The current search-field text (headless: assert the combined pattern klogg builds).
+    var selfTestSearchFieldText: String { searchBar.currentPattern }
 
     // MARK: - Filtered-view visibility (klogg visibilityBox_)
 
@@ -473,6 +612,22 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
     func selfTestMatchLabel(forCount count: Int) -> String {
         searchBar.updateMatchCount(count, finished: true)
         return searchBar.selfTestMatchLabelText
+    }
+
+    /// Drive the FULL search-bar path with all toggles, exactly as a Return press would
+    /// (sets the inverse/boolean toggles first, then runs `startSearch`). Used by the
+    /// headless harness to verify the bar → engine wiring for every toggle.
+    func selfTestRunSearchViaBar(pattern: String, caseInsensitive: Bool, isRegex: Bool,
+                                 inverse: Bool, boolean: Bool) {
+        searchBar.setInverse(inverse)
+        searchBar.setBooleanMode(boolean)
+        startSearch(pattern: pattern, caseInsensitive: caseInsensitive,
+                    isRegex: isRegex, inverse: inverse, boolean: boolean)
+    }
+
+    /// Current search-bar toggle states (headless persistence/wiring assertions).
+    var selfTestSearchToggles: (inverse: Bool, boolean: Bool, autoRefresh: Bool) {
+        (searchBar.selfTestInverse, searchBar.selfTestBoolean, searchBar.selfTestAutoRefresh)
     }
 
     // MARK: - QuickFind (Wave 6)
@@ -626,6 +781,13 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         onLoadingFinished?(self, success)
         // When following, every re-index (file grew) ends here — jump to the new tail.
         if isFollowing { scrollMainToEnd() }
+        // Auto-refresh (klogg searchState_.isAutorefreshAllowed): if the search should
+        // track file growth and we have an active search, re-run it over the (now larger)
+        // file so new matching tail lines appear in the filtered view. Only when the
+        // search range is whole-file (an explicit end limit means the user pinned it).
+        if isSearchAutoRefresh && lastSearch != nil && searchEndLine == Int.max {
+            rerunLastSearch()
+        }
     }
 
     /// The file on disk changed while watching. The engine re-indexes automatically and
@@ -715,6 +877,26 @@ final class TabController: NSViewController {
     func applyPredefinedFilter(_ filter: PredefinedFilter) {
         currentTab?.applyPredefinedFilter(filter)
     }
+
+    /// Drive the active tab's full search-bar path with all toggles (headless).
+    func selfTestRunSearchViaBar(pattern: String, caseInsensitive: Bool, isRegex: Bool,
+                                 inverse: Bool, boolean: Bool) {
+        currentTab?.selfTestRunSearchViaBar(pattern: pattern, caseInsensitive: caseInsensitive,
+                                            isRegex: isRegex, inverse: inverse, boolean: boolean)
+    }
+
+    /// Active tab's search-bar toggle states (headless).
+    var selfTestSearchToggles: (inverse: Bool, boolean: Bool, autoRefresh: Bool) {
+        currentTab?.selfTestSearchToggles ?? (false, false, false)
+    }
+
+    /// Drive the active tab's context-menu combine (replace/add/exclude) by term.
+    func selfTestCombineSearch(reset: Bool, op: String, term: String) {
+        currentTab?.selfTestCombineSearch(reset: reset, op: op, term: term)
+    }
+
+    /// The active tab's current search-field text (headless: the combined klogg pattern).
+    var selfTestSearchFieldText: String { currentTab?.selfTestSearchFieldText ?? "" }
 
     /// Set the active tab's filtered-view visibility mode (klogg visibilityBox_).
     func setFilteredVisibility(_ mode: FilteredVisibility) {

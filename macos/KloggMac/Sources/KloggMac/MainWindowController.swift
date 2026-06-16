@@ -762,6 +762,59 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         Int(tabController.currentTab?.engine.searchMatchCount() ?? 0)
     }
 
+    /// Full engine search with inverse/boolean/range — drives the new bridge method
+    /// directly (deterministic, independent of the async UI path). `endLine == Int.max`
+    /// means "to end of file".
+    func selfTestRunSearchFull(pattern: String, caseInsensitive: Bool, isRegex: Bool,
+                               inverse: Bool, boolean: Bool, startLine: Int, endLine: Int) {
+        tabController.currentTab?.engine.search(
+            withPattern: pattern, caseInsensitive: caseInsensitive, regex: isRegex,
+            inverse: inverse, boolean: boolean,
+            startLine: UInt(max(0, startLine)),
+            endLine: endLine == Int.max ? UInt.max : UInt(endLine))
+    }
+
+    /// Whether `pattern` is a valid search expression for the active engine (mirrors
+    /// klogg's isValid() gate; exercised for both regex and boolean modes).
+    func selfTestIsValidSearch(pattern: String, isRegex: Bool, boolean: Bool) -> Bool {
+        tabController.currentTab?.engine.isValidSearchPattern(
+            pattern, regex: isRegex, boolean: boolean) ?? false
+    }
+
+    /// Drive the FULL search-bar path with all toggles (klogg replaceCurrentSearch).
+    /// Sets the inverse/boolean toggles, then runs `pattern` exactly as a Return press.
+    func selfTestRunSearchViaBar(pattern: String, caseInsensitive: Bool, isRegex: Bool,
+                                 inverse: Bool, boolean: Bool) {
+        tabController.selfTestRunSearchViaBar(pattern: pattern, caseInsensitive: caseInsensitive,
+                                              isRegex: isRegex, inverse: inverse, boolean: boolean)
+    }
+
+    /// Set / clear the active tab's search-range limits via the context-menu code path.
+    func selfTestSetSearchStart(line: Int) { tabController.currentTab?.setSearchStart(line: line) }
+    func selfTestSetSearchEnd(line: Int)   { tabController.currentTab?.setSearchEnd(line: line) }
+    func selfTestClearSearchLimits()       { tabController.currentTab?.clearSearchLimits() }
+
+    /// The active tab's current search-range limits (start inclusive, end exclusive).
+    var selfTestSearchRange: (start: Int, end: Int) {
+        guard let t = tabController.currentTab else { return (0, Int.max) }
+        return (t.searchStartLine, t.searchEndLine)
+    }
+
+    /// Search-bar toggle states (headless assertions on persistence + wiring).
+    var selfTestSearchToggles: (inverse: Bool, boolean: Bool, autoRefresh: Bool) {
+        tabController.selfTestSearchToggles
+    }
+
+    /// Drive the context-menu combine (replace/add/exclude) by term — klogg crawlerwidget
+    /// replaceSearch/addToSearch/excludeFromSearch. `reset` clears the field + boolean
+    /// toggle first.
+    func selfTestCombineSearch(reset: Bool, op: String, term: String) {
+        tabController.selfTestCombineSearch(reset: reset, op: op, term: term)
+    }
+
+    /// Current search-field text — the combined pattern klogg builds (headless).
+    var selfTestSearchFieldText: String { tabController.selfTestSearchFieldText }
+
     // --- Filtered-view visibility modes (klogg visibilityBox_) ---
 
     /// Set the active tab's filtered-view visibility (Matches/Marks/Marks-and-matches).

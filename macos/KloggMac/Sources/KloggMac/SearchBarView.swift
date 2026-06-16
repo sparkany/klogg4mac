@@ -1,12 +1,18 @@
 //
-//  SearchBarView.swift — search toolbar strip above the split log views.
+//  SearchBarView.swift — search toolbar strip between the split log views.
 //
-//  Layout (left to right):
-//    [Search field ···········] [Aa case] [.* regex] [match label] [spinner]
+//  Layout (left to right, mirrors klogg crawlerwidget.cpp searchLineLayout):
+//    [Marks and matches ▾] [Aa] [.*] [≠] [&|] [↻] [filters ▾]
+//    [Search field ······] [🔍] [match label] [spinner]
+//
+//  Toggles map 1:1 to klogg's search-line buttons:
+//    Aa = matchCaseButton_ · .* = useRegexpButton_ · ≠ = inverseButton_ ·
+//    &| = booleanButton_   · ↻ = searchRefreshButton_ · 🔍 = searchButton_
 //
 //  Callbacks:
-//    onSearch(pattern, caseInsensitive, isRegex)  — called on Return / button tap
-//    onCancel()                                   — called when spinner (× button) tapped
+//    onSearch(pattern, caseInsensitive, isRegex, inverse, boolean) — Return / 🔍 tap
+//    onCancel()                — spinner (×) tapped
+//    onAutoRefreshChanged(on)  — ↻ toggled
 //
 //  This view does not call the engine directly; CrawlerTab owns the engine and
 //  sets the callbacks.
@@ -37,25 +43,43 @@ final class SearchBarView: NSView {
 
     // MARK: - Callbacks (set by CrawlerTab)
 
-    var onSearch: ((_ pattern: String, _ caseInsensitive: Bool, _ isRegex: Bool) -> Void)?
+    /// Run a search. `inverse` shows non-matching lines (klogg inverseButton_);
+    /// `boolean` parses the pattern as a logical combination (klogg booleanButton_).
+    var onSearch: ((_ pattern: String, _ caseInsensitive: Bool, _ isRegex: Bool,
+                    _ inverse: Bool, _ boolean: Bool) -> Void)?
     var onCancel: (() -> Void)?
     /// Fired when the user picks a different filtered-view visibility mode.
     var onVisibilityChanged: ((FilteredVisibility) -> Void)?
+    /// Fired when the auto-refresh toggle changes (klogg searchRefreshButton_), so the
+    /// owner can enable/disable re-running the search as the file grows.
+    var onAutoRefreshChanged: ((Bool) -> Void)?
 
     // MARK: - Controls
 
     private let visibilityPopup = NSPopUpButton()   // "Marks and matches ▾" view-mode selector
     private let filterPopup   = NSPopUpButton()   // ▾ predefined filters picker
     private let searchField   = NSSearchField()
-    private let caseButton    = NSButton()   // Aa — toggle case-sensitive
-    private let regexButton   = NSButton()   // .* — toggle regex
+    private let caseButton    = NSButton()   // Aa — toggle case-sensitive (klogg matchCaseButton_)
+    private let regexButton   = NSButton()   // .* — toggle regex (klogg useRegexpButton_)
+    private let inverseButton = NSButton()   // ≠  — inverse / exclude match (klogg inverseButton_)
+    private let booleanButton = NSButton()   // &| — boolean combination (klogg booleanButton_)
+    private let refreshButton = NSButton()   // ↻  — auto-refresh (klogg searchRefreshButton_)
+    private let searchButton  = NSButton()   // 🔍 — run the search (klogg searchButton_)
     private let matchLabel    = NSTextField()
     private let spinner       = NSProgressIndicator()
 
     // MARK: - State
 
-    private var isCaseInsensitive: Bool = true   // matches klogg default
-    private var isRegex: Bool = false
+    // Initial toggle states mirror klogg's CrawlerWidgetContext, persisted in
+    // AppPreferences. caseInsensitive is the inverse of klogg's matchCase.
+    private var isCaseInsensitive: Bool = AppPreferences.shared.searchIgnoreCase
+    private var isRegex: Bool = AppPreferences.shared.searchUseRegex
+    /// Inverse / exclude match — filtered view shows NON-matching lines.
+    private var isInverse: Bool = AppPreferences.shared.searchInverse
+    /// Boolean-combination mode — pattern parsed as a logical expression.
+    private var isBoolean: Bool = AppPreferences.shared.searchBoolean
+    /// Auto-refresh — re-run the search as the file grows (klogg searchRefreshButton_).
+    private var isAutoRefresh: Bool = AppPreferences.shared.searchAutoRefresh
     /// Current filtered-view visibility (klogg default: Marks and matches).
     private(set) var visibility: FilteredVisibility = .marksAndMatches
 
@@ -162,7 +186,7 @@ final class SearchBarView: NSView {
         caseButton.action = #selector(toggleCase(_:))
         addSubview(caseButton)
 
-        // Regex toggle button (.*).
+        // Regex toggle button (.*) — klogg useRegexpButton_.
         regexButton.translatesAutoresizingMaskIntoConstraints = false
         regexButton.title = ".*"
         regexButton.setButtonType(.toggle)
@@ -173,6 +197,57 @@ final class SearchBarView: NSView {
         regexButton.target = self
         regexButton.action = #selector(toggleRegex(_:))
         addSubview(regexButton)
+
+        // Inverse / exclude-match toggle (≠) — klogg inverseButton_. When ON the
+        // filtered view shows lines that do NOT match.
+        inverseButton.translatesAutoresizingMaskIntoConstraints = false
+        inverseButton.title = "≠"
+        inverseButton.setButtonType(.toggle)
+        inverseButton.bezelStyle = .rounded
+        inverseButton.font = .systemFont(ofSize: 12)
+        inverseButton.state = isInverse ? .on : .off
+        inverseButton.toolTip = "Inverse match (show non-matching lines)"
+        inverseButton.target = self
+        inverseButton.action = #selector(toggleInverse(_:))
+        addSubview(inverseButton)
+
+        // Boolean-combination toggle (&|) — klogg booleanButton_. When ON the pattern
+        // is parsed as a logical expression: "foo and not(bar)", quoted sub-patterns.
+        booleanButton.translatesAutoresizingMaskIntoConstraints = false
+        booleanButton.title = "&|"
+        booleanButton.setButtonType(.toggle)
+        booleanButton.bezelStyle = .rounded
+        booleanButton.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        booleanButton.state = isBoolean ? .on : .off
+        booleanButton.toolTip = "Enable regular expression logical combining"
+        booleanButton.target = self
+        booleanButton.action = #selector(toggleBoolean(_:))
+        addSubview(booleanButton)
+
+        // Auto-refresh toggle (↻) — klogg searchRefreshButton_. When ON the search
+        // re-runs as the file grows (with Follow).
+        refreshButton.translatesAutoresizingMaskIntoConstraints = false
+        refreshButton.title = "↻"
+        refreshButton.setButtonType(.toggle)
+        refreshButton.bezelStyle = .rounded
+        refreshButton.font = .systemFont(ofSize: 12)
+        refreshButton.state = isAutoRefresh ? .on : .off
+        refreshButton.toolTip = "Auto-refresh search as the file grows"
+        refreshButton.target = self
+        refreshButton.action = #selector(toggleRefresh(_:))
+        addSubview(refreshButton)
+
+        // Search push-button (🔍) — klogg searchButton_. Runs the current pattern,
+        // equivalent to pressing Return in the field.
+        searchButton.translatesAutoresizingMaskIntoConstraints = false
+        searchButton.title = "🔍"
+        searchButton.setButtonType(.momentaryPushIn)
+        searchButton.bezelStyle = .rounded
+        searchButton.font = .systemFont(ofSize: 11)
+        searchButton.toolTip = "Search"
+        searchButton.target = self
+        searchButton.action = #selector(searchButtonTapped(_:))
+        addSubview(searchButton)
 
         // Match count label ("N matches found.") — right-aligned, klogg searchInfoLine_.
         matchLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -219,14 +294,30 @@ final class SearchBarView: NSView {
             regexButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             regexButton.widthAnchor.constraint(equalToConstant: 32),
 
-            filterPopup.leadingAnchor.constraint(equalTo: regexButton.trailingAnchor, constant: 6),
+            inverseButton.leadingAnchor.constraint(equalTo: regexButton.trailingAnchor, constant: 4),
+            inverseButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            inverseButton.widthAnchor.constraint(equalToConstant: 30),
+
+            booleanButton.leadingAnchor.constraint(equalTo: inverseButton.trailingAnchor, constant: 4),
+            booleanButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            booleanButton.widthAnchor.constraint(equalToConstant: 32),
+
+            refreshButton.leadingAnchor.constraint(equalTo: booleanButton.trailingAnchor, constant: 4),
+            refreshButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            refreshButton.widthAnchor.constraint(equalToConstant: 30),
+
+            filterPopup.leadingAnchor.constraint(equalTo: refreshButton.trailingAnchor, constant: 6),
             filterPopup.centerYAnchor.constraint(equalTo: centerYAnchor),
             filterPopup.widthAnchor.constraint(equalToConstant: 44),
 
-            // Search field stretches to the match label.
+            // Search field stretches to the search push-button.
             searchField.leadingAnchor.constraint(equalTo: filterPopup.trailingAnchor, constant: 6),
             searchField.centerYAnchor.constraint(equalTo: centerYAnchor),
-            searchField.trailingAnchor.constraint(equalTo: matchLabel.leadingAnchor, constant: -8),
+            searchField.trailingAnchor.constraint(equalTo: searchButton.leadingAnchor, constant: -4),
+
+            searchButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            searchButton.trailingAnchor.constraint(equalTo: matchLabel.leadingAnchor, constant: -8),
+            searchButton.widthAnchor.constraint(equalToConstant: 34),
 
             // Right cluster: "N matches found." + spinner.
             spinner.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -255,11 +346,21 @@ final class SearchBarView: NSView {
     // MARK: - Actions
 
     @objc private func searchAction(_ sender: NSSearchField) {
-        let pattern = sender.stringValue.trimmingCharacters(in: .whitespaces)
+        runSearch(sender.stringValue)
+    }
+
+    @objc private func searchButtonTapped(_ sender: NSButton) {
+        runSearch(searchField.stringValue)
+    }
+
+    /// Record the pattern in the recent-search history (klogg addRecent) and fire the
+    /// search with the current toggle states. Shared by Return, the search button, and
+    /// the history menu.
+    private func runSearch(_ raw: String) {
+        let pattern = raw.trimmingCharacters(in: .whitespaces)
         guard !pattern.isEmpty else { return }
-        // Record in the recent-search history (klogg addRecent) before running.
         SavedSearchesStore.shared.addRecent(pattern)
-        onSearch?(pattern, isCaseInsensitive, isRegex)
+        onSearch?(pattern, isCaseInsensitive, isRegex, isInverse, isBoolean)
     }
 
     // MARK: - Search history dropdown (klogg savedSearches)
@@ -295,7 +396,7 @@ final class SearchBarView: NSView {
     @objc private func selectHistory(_ sender: NSMenuItem) {
         guard let text = sender.representedObject as? String else { return }
         searchField.stringValue = text
-        onSearch?(text, isCaseInsensitive, isRegex)
+        onSearch?(text, isCaseInsensitive, isRegex, isInverse, isBoolean)
     }
 
     @objc private func clearHistory(_ sender: NSMenuItem) {
@@ -304,10 +405,28 @@ final class SearchBarView: NSView {
 
     @objc private func toggleCase(_ sender: NSButton) {
         isCaseInsensitive = (sender.state == .on)
+        AppPreferences.shared.searchIgnoreCase = isCaseInsensitive
     }
 
     @objc private func toggleRegex(_ sender: NSButton) {
         isRegex = (sender.state == .on)
+        AppPreferences.shared.searchUseRegex = isRegex
+    }
+
+    @objc private func toggleInverse(_ sender: NSButton) {
+        isInverse = (sender.state == .on)
+        AppPreferences.shared.searchInverse = isInverse
+    }
+
+    @objc private func toggleBoolean(_ sender: NSButton) {
+        isBoolean = (sender.state == .on)
+        AppPreferences.shared.searchBoolean = isBoolean
+    }
+
+    @objc private func toggleRefresh(_ sender: NSButton) {
+        isAutoRefresh = (sender.state == .on)
+        AppPreferences.shared.searchAutoRefresh = isAutoRefresh
+        onAutoRefreshChanged?(isAutoRefresh)
     }
 
     // MARK: - Predefined filters
@@ -342,7 +461,7 @@ final class SearchBarView: NSView {
         regexButton.state = isRegex ? .on : .off
         caseButton.state = isCaseInsensitive ? .on : .off
         guard !filter.pattern.isEmpty else { return }
-        onSearch?(filter.pattern, isCaseInsensitive, isRegex)
+        onSearch?(filter.pattern, isCaseInsensitive, isRegex, isInverse, isBoolean)
     }
 
     // MARK: - Public API (called by CrawlerTab delegate methods)
@@ -353,8 +472,21 @@ final class SearchBarView: NSView {
     /// Whether regex mode is currently on.
     var isRegexMode: Bool { isRegex }
 
+    /// Whether boolean-combination mode is currently on (klogg booleanButton_).
+    var isBooleanMode: Bool { isBoolean }
+
+    /// Force boolean-combination mode on/off and reflect it in the toggle. Used by the
+    /// context-menu "Exclude from search", which switches klogg into boolean mode.
+    func setBooleanMode(_ on: Bool) {
+        isBoolean = on
+        booleanButton.state = on ? .on : .off
+        AppPreferences.shared.searchBoolean = on
+    }
+
     /// Set the field to `pattern` (with explicit regex/case flags) and run the search.
-    /// Used by the log-view context menu's Replace/Add/Exclude-search actions.
+    /// Used by the log-view context menu's Replace/Add/Exclude-search actions. Honours
+    /// the CURRENT inverse + boolean toggle states (klogg replaceCurrentSearch reads the
+    /// live button states, including any change the action made via setBooleanMode).
     func setSearchAndRun(pattern: String, isRegex: Bool, caseInsensitive: Bool) {
         searchField.stringValue = pattern
         self.isRegex = isRegex
@@ -362,7 +494,7 @@ final class SearchBarView: NSView {
         regexButton.state = isRegex ? .on : .off
         caseButton.state = caseInsensitive ? .on : .off
         guard !pattern.isEmpty else { return }
-        onSearch?(pattern, caseInsensitive, isRegex)
+        onSearch?(pattern, caseInsensitive, isRegex, isInverse, isBoolean)
     }
 
     /// Move keyboard focus to the search text field.
@@ -377,6 +509,13 @@ final class SearchBarView: NSView {
         } else {
             spinner.stopAnimation(nil)
         }
+    }
+
+    /// Show the "Error in expression" message in red (klogg searchInfoLine_ ErrorPalette).
+    /// Used when the pattern fails to compile (invalid regex / boolean expression).
+    func showSearchError() {
+        matchLabel.stringValue = "Error in expression"
+        matchLabel.textColor = .systemRed
     }
 
     /// Update the match-count label.
@@ -414,4 +553,28 @@ final class SearchBarView: NSView {
 
     /// Current match-count label text (headless assertions).
     var selfTestMatchLabelText: String { matchLabel.stringValue }
+
+    // MARK: - Toggle state (headless + programmatic)
+
+    /// Set the inverse toggle and reflect it in the button (headless tests + menu wiring).
+    func setInverse(_ on: Bool) {
+        isInverse = on
+        inverseButton.state = on ? .on : .off
+        AppPreferences.shared.searchInverse = on
+    }
+
+    /// Set the auto-refresh toggle and reflect it (headless + menu). Fires the callback.
+    func setAutoRefresh(_ on: Bool) {
+        isAutoRefresh = on
+        refreshButton.state = on ? .on : .off
+        AppPreferences.shared.searchAutoRefresh = on
+        onAutoRefreshChanged?(on)
+    }
+
+    var selfTestInverse: Bool { isInverse }
+    var selfTestBoolean: Bool { isBoolean }
+    var selfTestAutoRefresh: Bool { isAutoRefresh }
+
+    /// Empty the search field (headless: start a combine sequence from a clean field).
+    func clearFieldForTest() { searchField.stringValue = "" }
 }
