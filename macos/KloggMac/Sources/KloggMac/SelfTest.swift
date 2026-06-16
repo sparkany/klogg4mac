@@ -15,7 +15,8 @@ enum SelfTest {
 
     static func run(windowController wc: MainWindowController) {
         var out = "===== KLOGG SELFTEST =====\n"
-        out += auditMenu()
+        out += defaultsIsolationTests()
+        out += "\n" + auditMenu()
         out += "\n" + auditToolbar(wc)
         out += "\n" + snapshots(wc)
         out += "\n" + behaviorTests(wc)
@@ -51,6 +52,35 @@ enum SelfTest {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
         }
         return true
+    }
+
+    // MARK: - UserDefaults isolation (selftest must not touch real prefs)
+
+    /// Prove the harness is writing to a throwaway suite, not the user's real
+    /// "KloggMac" domain. (a) AppDefaults.store is NOT UserDefaults.standard;
+    /// (b) a write through a store lands in the isolated suite and is INVISIBLE in
+    /// standard. This is the guard against the known defect where --selftest
+    /// polluted the user's favorites / highlighters / session / color-labels.
+    private static func defaultsIsolationTests() -> String {
+        var s = "--- DEFAULTS ISOLATION TESTS ---\n"
+
+        let isolated = AppDefaults.store !== UserDefaults.standard
+        s += isolated
+            ? "PASS AppDefaults.store is an isolated suite (not .standard)\n"
+            : "FAIL AppDefaults.store is UserDefaults.standard — selftest would corrupt real prefs\n"
+
+        // Write a sentinel through a real store and confirm it does NOT reach standard.
+        let probePath = "/tmp/klogg-isolation-probe-\(UUID().uuidString).log"
+        FavoritesStore.shared.add(path: probePath)
+        let inIsolated = FavoritesStore.shared.isFavorite(probePath)
+        let leakedToStandard = (UserDefaults.standard.stringArray(forKey: "klogg.favorites") ?? [])
+            .contains(probePath)
+        FavoritesStore.shared.remove(path: probePath)   // clean the isolated suite
+        s += (inIsolated && !leakedToStandard)
+            ? "PASS store write stays in isolated suite (real 'klogg.favorites' untouched)\n"
+            : "FAIL store write leaked: isolated=\(inIsolated) standard=\(leakedToStandard)\n"
+
+        return s
     }
 
     // MARK: - Offscreen snapshots

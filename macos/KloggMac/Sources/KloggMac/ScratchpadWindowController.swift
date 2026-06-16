@@ -215,11 +215,11 @@ final class ScratchpadWindowController: NSWindowController {
     // MARK: - Persistence
 
     private func loadContent() {
-        textView.string = UserDefaults.standard.string(forKey: contentKey) ?? ""
+        textView.string = AppDefaults.store.string(forKey: contentKey) ?? ""
     }
 
     private func saveContent() {
-        UserDefaults.standard.set(textView.string, forKey: contentKey)
+        AppDefaults.store.set(textView.string, forKey: contentKey)
     }
 
     // MARK: - Live transforms

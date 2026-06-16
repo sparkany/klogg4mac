@@ -49,7 +49,7 @@ final class HighlighterStore {
     // MARK: - Persistence
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: key),
+        guard let data = AppDefaults.store.data(forKey: key),
               let decoded = try? decoder.decode([HighlighterRule].self, from: data) else {
             rules = []
             return
@@ -59,6 +59,6 @@ final class HighlighterStore {
 
     private func save() {
         guard let data = try? encoder.encode(rules) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+        AppDefaults.store.set(data, forKey: key)
     }
 }

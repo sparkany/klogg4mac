@@ -62,7 +62,7 @@ final class PredefinedFilterStore {
     }
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: key),
+        guard let data = AppDefaults.store.data(forKey: key),
               let decoded = try? decoder.decode([PredefinedFilter].self, from: data) else {
             filters = []
             return
@@ -72,6 +72,6 @@ final class PredefinedFilterStore {
 
     private func save() {
         guard let data = try? encoder.encode(filters) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+        AppDefaults.store.set(data, forKey: key)
     }
 }

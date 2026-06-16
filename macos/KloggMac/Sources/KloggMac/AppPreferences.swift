@@ -113,14 +113,14 @@ final class AppPreferences {
     /// Ordered list of file paths open in the previous session. Restored on launch
     /// when loadLastSession is true and no file was given on the command line.
     var sessionOpenFiles: [String] {
-        get { (UserDefaults.standard.array(forKey: key("session.openFiles")) as? [String]) ?? [] }
-        set { UserDefaults.standard.set(newValue, forKey: key("session.openFiles")) }
+        get { (AppDefaults.store.array(forKey: key("session.openFiles")) as? [String]) ?? [] }
+        set { AppDefaults.store.set(newValue, forKey: key("session.openFiles")) }
     }
 
     /// Index (into sessionOpenFiles) of the tab that was active. Clamped on restore.
     var sessionActiveIndex: Int {
         get { int("session.activeIndex", default: 0) }
-        set { UserDefaults.standard.set(newValue, forKey: key("session.activeIndex")) }
+        set { AppDefaults.store.set(newValue, forKey: key("session.activeIndex")) }
     }
 
     /// Persist the open files + active tab as the last session (no change notification —
@@ -188,23 +188,23 @@ final class AppPreferences {
 
     private func bool(_ k: String, default d: Bool) -> Bool {
         let full = key(k)
-        guard UserDefaults.standard.object(forKey: full) != nil else { return d }
-        return UserDefaults.standard.bool(forKey: full)
+        guard AppDefaults.store.object(forKey: full) != nil else { return d }
+        return AppDefaults.store.bool(forKey: full)
     }
 
     private func int(_ k: String, default d: Int) -> Int {
         let full = key(k)
-        guard UserDefaults.standard.object(forKey: full) != nil else { return d }
-        return UserDefaults.standard.integer(forKey: full)
+        guard AppDefaults.store.object(forKey: full) != nil else { return d }
+        return AppDefaults.store.integer(forKey: full)
     }
 
     private func str(_ k: String, default d: String) -> String {
-        UserDefaults.standard.string(forKey: key(k)) ?? d
+        AppDefaults.store.string(forKey: key(k)) ?? d
     }
 
-    private func set(_ k: String, b: Bool)   { UserDefaults.standard.set(b, forKey: key(k)); notify() }
-    private func set(_ k: String, i: Int)    { UserDefaults.standard.set(i, forKey: key(k)); notify() }
-    private func set(_ k: String, s: String) { UserDefaults.standard.set(s, forKey: key(k)); notify() }
+    private func set(_ k: String, b: Bool)   { AppDefaults.store.set(b, forKey: key(k)); notify() }
+    private func set(_ k: String, i: Int)    { AppDefaults.store.set(i, forKey: key(k)); notify() }
+    private func set(_ k: String, s: String) { AppDefaults.store.set(s, forKey: key(k)); notify() }
 
     private func notify() {
         DispatchQueue.main.async { [weak self] in

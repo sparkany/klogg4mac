@@ -21,7 +21,7 @@ final class FavoritesStore {
     }
 
     private init() {
-        paths = UserDefaults.standard.stringArray(forKey: defaultsKey) ?? []
+        paths = AppDefaults.store.stringArray(forKey: defaultsKey) ?? []
     }
 
     func isFavorite(_ path: String) -> Bool {
@@ -48,6 +48,6 @@ final class FavoritesStore {
     }
 
     private func persist() {
-        UserDefaults.standard.set(paths, forKey: defaultsKey)
+        AppDefaults.store.set(paths, forKey: defaultsKey)
     }
 }

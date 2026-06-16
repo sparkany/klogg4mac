@@ -15,7 +15,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Headless QA mode: introspect menus/toolbar/behavior without showing any
         // window (see SelfTest.swift). `KloggMac --selftest [logfile]`.
         let selfTest = CommandLine.arguments.contains("--selftest")
-        if selfTest { NSApp.setActivationPolicy(.prohibited) }
+        if selfTest {
+            NSApp.setActivationPolicy(.prohibited)
+            // Route every persisted store (prefs, favorites, highlighters, filters,
+            // session, color-labels, scratchpad) at a throwaway suite so the harness
+            // never corrupts the user's real "KloggMac" preferences. MUST happen
+            // before any `.shared` store is first touched (AppMenu/MainWindowController
+            // below read store state in their initialisers).
+            AppDefaults.useIsolatedSuite()
+        }
 
         // Install the full klogg menu bar (Wave 2).
         AppMenu.install()

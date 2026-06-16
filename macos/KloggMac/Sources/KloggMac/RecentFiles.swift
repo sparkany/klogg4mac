@@ -24,7 +24,7 @@ final class RecentFiles {
     }
 
     private init() {
-        let stored = UserDefaults.standard.stringArray(forKey: defaultsKey) ?? []
+        let stored = AppDefaults.store.stringArray(forKey: defaultsKey) ?? []
         paths = stored.filter { FileManager.default.fileExists(atPath: $0) }
     }
 
@@ -47,6 +47,6 @@ final class RecentFiles {
     }
 
     private func persist() {
-        UserDefaults.standard.set(paths, forKey: defaultsKey)
+        AppDefaults.store.set(paths, forKey: defaultsKey)
     }
 }
