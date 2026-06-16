@@ -51,6 +51,22 @@ final class LogHighlighter {
     /// when there are no highlighters.
     private(set) var hasRules = false
 
+    /// Cached at rebuild(): whether match-only spans get a per-token shade variation
+    /// (klogg variateColors). Read once per rebuild so draw() doesn't hit prefs.
+    private var variateColors = false
+
+    /// klogg colorVariance_ default — the ± percentage applied to the darker() factor.
+    private static let colorVariance = 15
+
+    /// Map a matched token to a QColor::darker-style factor (100 = unchanged),
+    /// deterministically per token (klogg seeds minstd_rand0 with crc32(match)).
+    private static func variFactor(for token: String) -> Int {
+        var h: UInt32 = 2166136261   // FNV-1a, a stable per-token hash
+        for b in token.utf8 { h = (h ^ UInt32(b)) &* 16777619 }
+        let span = 2 * colorVariance + 1
+        return 100 - colorVariance + Int(h % UInt32(span))
+    }
+
     init() {
         rebuild()
     }
@@ -93,6 +109,7 @@ final class LogHighlighter {
 
         compiled = rules
         hasRules = !compiled.isEmpty
+        variateColors = AppPreferences.shared.variateHighlightColors
     }
 
     /// Evaluate `line` against the compiled rules, mirroring klogg's last→first pass.
@@ -113,20 +130,28 @@ final class LogHighlighter {
 
             if rule.matchOnly {
                 // Word match: contribute the matched substring ranges (or capture
-                // groups, as klogg does when the pattern has capture groups).
+                // groups, as klogg does when the pattern has capture groups). When the
+                // "variate colours" preference is on, derive a per-match shade from a
+                // hash of the matched text (klogg Highlighter::vairateColors), so each
+                // distinct token gets a consistent but distinguishable colour.
+                let variate = variateColors
                 for m in matches {
-                    if m.numberOfRanges > 1 {
-                        for i in 1..<m.numberOfRanges {
-                            let r = m.range(at: i)
-                            if r.location != NSNotFound, r.length > 0 {
-                                spans.append(HighlightSpan(range: r, fore: rule.fore, back: rule.back))
-                            }
-                        }
-                    } else {
-                        let r = m.range
-                        if r.length > 0 {
+                    func addSpan(_ r: NSRange) {
+                        guard r.location != NSNotFound, r.length > 0 else { return }
+                        if variate {
+                            let token = ns.substring(with: r)
+                            let factor = Self.variFactor(for: token)
+                            spans.append(HighlightSpan(range: r,
+                                                       fore: rule.fore.darkened(by: factor),
+                                                       back: rule.back.darkened(by: factor)))
+                        } else {
                             spans.append(HighlightSpan(range: r, fore: rule.fore, back: rule.back))
                         }
+                    }
+                    if m.numberOfRanges > 1 {
+                        for i in 1..<m.numberOfRanges { addSpan(m.range(at: i)) }
+                    } else {
+                        addSpan(m.range)
                     }
                 }
             } else {
@@ -138,5 +163,20 @@ final class LogHighlighter {
         }
 
         return LineHighlight(isFullLine: isFullLine, spans: spans)
+    }
+}
+
+// MARK: - QColor::darker(factor) equivalent
+
+private extension NSColor {
+    /// Mirror Qt's QColor::darker(factor): for factor >= 100, divide value (HSV) by
+    /// factor/100; for factor < 100 it lightens. Operates in HSB to match Qt.
+    func darkened(by factor: Int) -> NSColor {
+        guard let c = usingColorSpace(.deviceRGB) else { return self }
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        c.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        let f = CGFloat(max(1, factor)) / 100.0
+        let nb = min(1.0, max(0.0, b / f))
+        return NSColor(hue: h, saturation: s, brightness: nb, alpha: a)
     }
 }

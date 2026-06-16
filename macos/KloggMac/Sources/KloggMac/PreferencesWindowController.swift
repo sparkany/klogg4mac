@@ -58,6 +58,9 @@ final class PreferencesWindowController: NSWindowController {
     private let autoRunCheck       = NSButton(checkboxWithTitle: "Auto-run search while typing",target: nil, action: nil)
     private let highlightMainCheck = NSButton(checkboxWithTitle: "Highlight matches in main view", target: nil, action: nil)
     private let incrementalCheck   = NSButton(checkboxWithTitle: "Incremental QuickFind",      target: nil, action: nil)
+    private let variateHlCheck     = NSButton(checkboxWithTitle: "Variate highlight colours per match", target: nil, action: nil)
+    private let searchHistoryField = NSTextField()
+    private let recentFilesField   = NSTextField()
 
     // MARK: - Behavior tab controls
 
@@ -153,11 +156,21 @@ final class PreferencesWindowController: NSWindowController {
         let typeLbl = NSTextField(labelWithString: "Default search type:")
         typeLbl.font = .systemFont(ofSize: 13)
 
+        func lbl(_ s: String) -> NSTextField { let f = NSTextField(labelWithString: s); f.alignment = .right; return f }
+        searchHistoryField.formatter = intFormatter(min: 1, max: 1000)
+        recentFilesField.formatter   = intFormatter(min: 1, max: 25)
+        let histRow = NSStackView(views: [lbl("Search history size:"), searchHistoryField])
+        histRow.spacing = 8
+        let recentRow = NSStackView(views: [lbl("Recent files kept:"), recentFilesField])
+        recentRow.spacing = 8
+
         let stack = NSStackView(views: [
             typeLbl, regexpTypeSegment,
             NSBox().asSep(),
             ignoreCaseCheck, autoRefreshCheck, autoRunCheck,
-            highlightMainCheck, incrementalCheck, NSView(),
+            highlightMainCheck, variateHlCheck, incrementalCheck,
+            NSBox().asSep(),
+            histRow, recentRow, NSView(),
         ])
         stack.orientation = .vertical
         stack.alignment   = .leading
@@ -247,7 +260,10 @@ final class PreferencesWindowController: NSWindowController {
         autoRefreshCheck.state           = p.searchAutoRefresh    ? .on : .off
         autoRunCheck.state               = p.autoRunSearch        ? .on : .off
         highlightMainCheck.state         = p.highlightSearchInMain ? .on : .off
+        variateHlCheck.state             = p.variateHighlightColors ? .on : .off
         incrementalCheck.state           = p.quickfindIncremental ? .on : .off
+        searchHistoryField.integerValue  = p.searchHistorySize
+        recentFilesField.integerValue    = p.recentFilesMaxItems
 
         loadLastCheck.state              = p.loadLastSession      ? .on : .off
         followLoadCheck.state            = p.followFileOnLoad     ? .on : .off
@@ -268,6 +284,7 @@ final class PreferencesWindowController: NSWindowController {
         let checks: [NSButton] = [
             wrapCheck, boldFontCheck, hideAnsiCheck, lineNumMainCheck, lineNumFiltCheck,
             ignoreCaseCheck, autoRefreshCheck, autoRunCheck, highlightMainCheck, incrementalCheck,
+            variateHlCheck,
             loadLastCheck, followLoadCheck, nativeWatchCheck, pollingCheck, followScrollCheck,
             parallelSearchCheck, resultsCacheCheck,
         ]
@@ -277,7 +294,8 @@ final class PreferencesWindowController: NSWindowController {
         regexpTypeSegment.action = #selector(regexpTypeChanged(_:))
 
         for tf: NSTextField in [fontFamilyField, fontSizeField, pollIntervalField,
-                                 cacheLinesField, indexBufField] {
+                                 cacheLinesField, indexBufField,
+                                 searchHistoryField, recentFilesField] {
             tf.target = self
             tf.action = #selector(textChanged(_:))
         }
@@ -301,6 +319,7 @@ final class PreferencesWindowController: NSWindowController {
         case autoRefreshCheck:   p.searchAutoRefresh      = on
         case autoRunCheck:       p.autoRunSearch          = on
         case highlightMainCheck: p.highlightSearchInMain  = on
+        case variateHlCheck:     p.variateHighlightColors = on
         case incrementalCheck:   p.quickfindIncremental   = on
         case loadLastCheck:      p.loadLastSession        = on
         case followLoadCheck:    p.followFileOnLoad       = on
@@ -331,6 +350,8 @@ final class PreferencesWindowController: NSWindowController {
             let v = max(1, min(1024, sender.integerValue))
             p.indexReadBufferSizeMb = v
             indexBufStepper.intValue = Int32(v)
+        case searchHistoryField: p.searchHistorySize  = sender.integerValue
+        case recentFilesField:   p.recentFilesMaxItems = sender.integerValue
         default: break
         }
     }

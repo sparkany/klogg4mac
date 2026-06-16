@@ -161,6 +161,12 @@ final class CrawlerTab: NSViewController, KloggEngineDelegate {
         filteredView.applyFontPreference()
         mainView.applyViewPreferences()
         filteredView.applyViewPreferences()
+        // The variate-highlight-colours preference affects compiled highlight spans.
+        mainView.applyHighlighters()
+        filteredView.applyHighlighters()
+        // Keep the recent-file / search-history caps in sync with the prefs.
+        RecentFiles.shared.applyMaxCount()
+        SavedSearchesStore.shared.applyMaxHistory()
         // Re-apply (or clear) the main-view search wash now that the
         // highlightSearchInMain preference may have changed.
         if let s = lastSearch {

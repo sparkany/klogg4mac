@@ -130,6 +130,26 @@ final class AppPreferences {
         set { set("quickfind.incremental", b: newValue) }
     }
 
+    /// Max number of saved search-history entries (klogg savedSearches.historySize,
+    /// default 50). Clamped to a sane range.
+    var searchHistorySize: Int {
+        get { int("savedSearches.historySize", default: 50) }
+        set { set("savedSearches.historySize", i: max(1, min(1000, newValue))) }
+    }
+
+    /// Max number of recent files retained (klogg recentFiles.filesHistoryMaxItems,
+    /// bounded by MAX_RECENT_FILES = 25).
+    var recentFilesMaxItems: Int {
+        get { int("recentFiles.maxItems", default: 10) }
+        set { set("recentFiles.maxItems", i: max(1, min(25, newValue))) }
+    }
+
+    /// Variate the shade of highlight colours per match (klogg variateHighlightCheckBox).
+    var variateHighlightColors: Bool {
+        get { bool("highlighters.variateColors", default: false) }
+        set { set("highlighters.variateColors", b: newValue) }
+    }
+
     // MARK: - Behavior  (keys: session.*, perf.*)
 
     var loadLastSession: Bool {

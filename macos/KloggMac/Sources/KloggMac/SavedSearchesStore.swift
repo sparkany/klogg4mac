@@ -21,8 +21,9 @@ final class SavedSearchesStore {
 
     static let shared = SavedSearchesStore()
 
-    /// klogg's SavedSearches::MaxNumberOfRecentSearches default.
-    private static let maxHistory = 50
+    /// History size is configurable via Preferences (klogg savedSearches.historySize,
+    /// default MaxNumberOfRecentSearches = 50).
+    private var maxHistory: Int { AppPreferences.shared.searchHistorySize }
     private let key = "klogg.savedSearches"
 
     private(set) var searches: [String] = []
@@ -40,10 +41,18 @@ final class SavedSearchesStore {
         guard !t.isEmpty else { return }
         searches.removeAll { $0 == t }
         searches.insert(t, at: 0)
-        if searches.count > Self.maxHistory {
-            searches = Array(searches.prefix(Self.maxHistory))
+        if searches.count > maxHistory {
+            searches = Array(searches.prefix(maxHistory))
         }
         persist()
+    }
+
+    /// Re-apply the (possibly lowered) history-size preference, trimming the tail.
+    func applyMaxHistory() {
+        if searches.count > maxHistory {
+            searches = Array(searches.prefix(maxHistory))
+            persist()
+        }
     }
 
     func clear() {

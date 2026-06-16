@@ -44,6 +44,7 @@ enum SelfTest {
         out += "\n" + decompressionTests(wc)
         out += "\n" + fontZoomTests(wc)
         out += "\n" + saveToFileTests(wc)
+        out += "\n" + historyAndVariateTests()
         out += "\n" + shortcutAudit()
         out += "===== END SELFTEST =====\n"
         FileHandle.standardError.write(out.data(using: .utf8)!)
@@ -1656,6 +1657,84 @@ enum SelfTest {
             : "FAIL save-to-file: ok=\(ok) count=\(savedLines.count)/\(n) first=\(savedLines.first ?? "nil") last=\(savedLines.last ?? "nil")\n"
 
         while wc.selfTestTabCount > startTabs { wc.closeCurrentTab(nil) }
+        return s
+    }
+
+    // MARK: - History caps + variate highlight (Wave 14)
+
+    /// Prove the new configurable history caps and the variate-highlight preference:
+    /// (a) lowering searchHistorySize trims the saved-search list (klogg historySize);
+    /// (b) lowering recentFilesMaxItems trims the recent-files list;
+    /// (c) variateHighlightColors makes two distinct match-only tokens get DIFFERENT
+    ///     background shades, while OFF they share one colour.
+    private static func historyAndVariateTests() -> String {
+        var s = "--- HISTORY CAPS + VARIATE TESTS ---\n"
+        let p = AppPreferences.shared
+
+        // (a) Search-history trim.
+        let savedHist = p.searchHistorySize
+        let ss = SavedSearchesStore.shared
+        ss.clear()
+        p.searchHistorySize = 50
+        for i in 1...10 { ss.addRecent("query \(i)") }
+        let before = ss.recentSearches().count
+        p.searchHistorySize = 3
+        ss.applyMaxHistory()
+        let after = ss.recentSearches().count
+        s += (before == 10 && after == 3)
+            ? "PASS search-history trim: \(before) → \(after) when cap set to 3\n"
+            : "FAIL search-history trim: \(before) → \(after) (expected 10 → 3)\n"
+        ss.clear()
+        p.searchHistorySize = savedHist
+
+        // (b) Recent-files trim.
+        let savedRecent = p.recentFilesMaxItems
+        let rf = RecentFiles.shared
+        rf.clear()
+        p.recentFilesMaxItems = 25
+        // Use existing files so RecentFiles keeps them (it filters non-existent on init,
+        // but add() does not stat — so any path is retained in-session).
+        for i in 1...8 { rf.add(path: "/tmp/klogg-selftest-recent-\(i).log") }
+        let rBefore = rf.paths.count
+        p.recentFilesMaxItems = 4
+        rf.applyMaxCount()
+        let rAfter = rf.paths.count
+        s += (rBefore == 8 && rAfter == 4)
+            ? "PASS recent-files trim: \(rBefore) → \(rAfter) when cap set to 4\n"
+            : "FAIL recent-files trim: \(rBefore) → \(rAfter) (expected 8 → 4)\n"
+        rf.clear()
+        p.recentFilesMaxItems = savedRecent
+
+        // (c) Variate highlight: two distinct tokens, one match-only rule.
+        let savedRules = HighlighterStore.shared.rules
+        let savedVariate = p.variateHighlightColors
+        let rule = HighlighterRule(name: "v", pattern: "tok[0-9]+", ignoreCase: false,
+                                   useRegex: true, matchOnly: true, enabled: true,
+                                   foreColor: .black, backColor: NSColor(deviceRed: 0.8, green: 0.4, blue: 0.2, alpha: 1))
+        HighlighterStore.shared.setRules([rule])
+        let line = "here tok1 and tok2 differ"
+
+        func backColorsFor(variate: Bool) -> [NSColor] {
+            p.variateHighlightColors = variate
+            let hl = LogHighlighter()   // reads the pref at init/rebuild
+            let result = hl.highlight(line: line)
+            return result.spans.map { $0.back }
+        }
+
+        let offColors = backColorsFor(variate: false)
+        let onColors  = backColorsFor(variate: true)
+        func approxEqual(_ a: NSColor, _ b: NSColor) -> Bool {
+            guard let x = a.usingColorSpace(.deviceRGB), let y = b.usingColorSpace(.deviceRGB) else { return false }
+            return abs(x.brightnessComponent - y.brightnessComponent) < 0.01
+        }
+        let offSame = offColors.count == 2 && approxEqual(offColors[0], offColors[1])
+        let onDiff  = onColors.count == 2 && !approxEqual(onColors[0], onColors[1])
+        s += (offSame && onDiff)
+            ? "PASS variate highlight: OFF → identical shade, ON → distinct shades per token\n"
+            : "FAIL variate highlight: offSame=\(offSame) onDiff=\(onDiff) (off=\(offColors.count) on=\(onColors.count))\n"
+
+        HighlighterStore.shared.setRules(savedRules)
+        p.variateHighlightColors = savedVariate
         return s
     }
 

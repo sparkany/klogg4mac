@@ -12,8 +12,8 @@ final class RecentFiles {
 
     static let shared = RecentFiles()
 
-    // klogg uses 10 recent files by default.
-    private let maxCount = 10
+    // Cap is configurable via Preferences (klogg recentFiles.filesHistoryMaxItems).
+    private var maxCount: Int { AppPreferences.shared.recentFilesMaxItems }
     private let defaultsKey = "klogg.recentFiles"
 
     // Observers receive the updated list.
@@ -44,6 +44,11 @@ final class RecentFiles {
     /// Clear the entire list.
     func clear() {
         paths = []
+    }
+
+    /// Re-apply the (possibly lowered) max-count preference, trimming the tail.
+    func applyMaxCount() {
+        if paths.count > maxCount { paths = Array(paths.prefix(maxCount)) }
     }
 
     private func persist() {
