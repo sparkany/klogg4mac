@@ -203,8 +203,18 @@ void LogFilteredDataWorker::connectSignalsAndRun( SearchOperation* operationRequ
 void LogFilteredDataWorker::search( const RegularExpressionPattern& regExp, LineNumber startLine,
                                     LineNumber endLine )
 {
-    ScopedLock locker( operationsMutex_ ); // to protect operationRequested_
+    // Drain any previous search runnable BEFORE taking operationsMutex_. The runnable
+    // itself acquires operationsMutex_ (below), so waiting for it while holding the mutex
+    // dead-locks when a new search is requested before the previous runnable has grabbed
+    // the lock — exactly what rapid back-to-back searches do (gQtThread blocks in
+    // waitForDone() holding operationsMutex_; the prior pool runnable blocks acquiring it).
+    // Interrupt first so an in-flight search actually stops, then wait for it to exit.
+    // search()/updateSearch() are only ever invoked from the engine's single Qt thread,
+    // so draining before locking introduces no new cross-thread race.
+    interruptRequested_.set();
     operationsPool_.waitForDone();
+
+    ScopedLock locker( operationsMutex_ ); // to protect operationRequested_
     interruptRequested_.clear();
 
     LOG_INFO << "Search requested";
@@ -223,8 +233,12 @@ void LogFilteredDataWorker::updateSearch( const RegularExpressionPattern& regExp
                                           LineNumber startLine, LineNumber endLine,
                                           LineNumber position )
 {
-    ScopedLock locker( operationsMutex_ ); // to protect operationRequested_
+    // See search() above: drain the previous runnable before locking to avoid the
+    // operationsMutex_/waitForDone() deadlock under rapid successive search requests.
+    interruptRequested_.set();
     operationsPool_.waitForDone();
+
+    ScopedLock locker( operationsMutex_ ); // to protect operationRequested_
     interruptRequested_.clear();
 
     LOG_INFO << "Search update requested from " << position.get();

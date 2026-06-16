@@ -96,6 +96,18 @@ LogData::LogData()
 LogData::~LogData()
 {
     LOG_DEBUG << "Destroying log data";
+
+    // Disconnect from the process-global FileWatcher FIRST, before any member is torn
+    // down. The watcher delivers fileChanged() to fileChangedOnDisk() via a queued
+    // connection on this object's thread; that slot dereferences attached_file_. Member
+    // teardown (which frees attached_file_) and the QObject base destructor (which
+    // disconnects signals + purges posted events) run AFTER this body. Disconnecting
+    // here guarantees no fileChanged slot can be invoked on a half- or fully-destroyed
+    // LogData, and any change still in the watcher's throttler can never reach us — which
+    // is the rapid-close / re-index use-after-free seen as a SIGSEGV in
+    // pthread_mutex_lock -> FileHolder::getFileId -> LogData::fileChangedOnDisk.
+    disconnect( &FileWatcher::getFileWatcher(), nullptr, this, nullptr );
+
     operationQueue_.shutdown();
 }
 
@@ -155,6 +167,18 @@ void LogData::reload( QTextCodec* forcedEncoding )
 void LogData::fileChangedOnDisk( const QString& filename )
 {
     LOG_INFO << "signalFileChanged " << filename << ", indexed file " << indexingFileName_;
+
+    // FileWatcher::fileChanged is a process-global broadcast: it is delivered to EVERY
+    // connected LogData, not only the one owning `filename`. A LogData whose attachFile()
+    // has not run yet (e.g. a freshly-opened tab while another tab's file is being polled)
+    // still has a null attached_file_. The code below dereferences attached_file_ before
+    // it filters by filename, so such a LogData null-derefs -> SIGSEGV in
+    // FileHolder::getFileId(). Guard it: with no file attached there is nothing to react
+    // to. (The existing filename / file-id checks below then handle "not our file".)
+    if ( !attached_file_ ) {
+        LOG_DEBUG << "ignore file update: no file attached yet";
+        return;
+    }
 
     QFileInfo info( indexingFileName_ );
     const auto currentFileId = FileId::getFileId( indexingFileName_ );
