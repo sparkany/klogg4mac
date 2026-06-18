@@ -45,6 +45,26 @@ page for how to use Klogg.
 
 I try to keep a [changelog](CHANGELOG.md) with monthly changes. 
 
+## Native macOS app (AppKit port)
+
+This fork adds **klogg4mac** — a native [AppKit](https://developer.apple.com/documentation/appkit)
+re-implementation of klogg's UI on top of the existing, proven C++ engine
+(arm64, Apple silicon). The UI layer never touches a Qt type; the engine
+(indexing / regex search / settings / encoding detection) is reused as static
+libraries behind a thin Objective-C++ bridge. Build instructions are in
+[`macos/README.md`](macos/README.md).
+
+| Browse | Search & filter |
+| :----: | :-------------: |
+| ![klogg4mac — browsing a log with line numbers](macos/screenshots/klogg-macos-browse.png) | ![klogg4mac — search highlighting, the filtered pane, marks and the scrollbar overview](macos/screenshots/klogg-macos-search.png) |
+
+The native app mirrors klogg feature-for-feature: incremental search with
+regex / case / inverse / boolean toggles, the split main + filtered view,
+predefined filters, highlighters and colour labels, marks, the scrollbar
+overview, follow (tail) mode, multi-encoding decoding with auto-detection,
+compressed-log opening (gz / bz2 / xz), font-size zoom, drag-and-drop, and
+session restore.
+
 ## Table of Contents
 
 1. [About the Project](#about-the-project)

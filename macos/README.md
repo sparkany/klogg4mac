@@ -4,6 +4,18 @@ Native AppKit re-implementation of klogg's UI on top of the existing, proven C++
 engine. See [`docs/native-macos/ROADMAP.md`](../docs/native-macos/ROADMAP.md) for
 the architecture, team design, and phased plan.
 
+## Screenshots
+
+Browsing a log (line numbers, scrollbar overview):
+
+![klogg4mac browsing a log](screenshots/klogg-macos-browse.png)
+
+Search & filter — highlighted matches in the main pane, the filtered (matches-only)
+pane below, a marked line, colour-labelled tokens, and the search line with its
+regex / case / inverse / boolean toggles:
+
+![klogg4mac search and filter](screenshots/klogg-macos-search.png)
+
 ## Layout
 
 ```
