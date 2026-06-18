@@ -67,3 +67,4 @@ macos/KloggMac/.build/
 macos/*.png
 macos/build/
 *.dmg
+.DS_Store

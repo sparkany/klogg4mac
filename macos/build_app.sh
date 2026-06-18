@@ -183,4 +183,23 @@ else
     echo "WARNING: bundle still has /opt/homebrew references (see RESIDUAL above)" >&2
 fi
 
+# --- ad-hoc code signing ---------------------------------------------------
+# install_name_tool rewrites above INVALIDATE each Mach-O's signature, and on
+# Apple Silicon an invalid/absent signature makes the binary refuse to launch
+# ("code signature invalid" / killed). Re-sign ad-hoc (no Developer ID): the app
+# then runs locally and on other Macs after the user clears the download
+# quarantine. (For a notarised, Gatekeeper-clean build, set KLOGG_SIGN_IDENTITY
+# to a "Developer ID Application: …" identity — see the header TODO.)
+echo "==> Ad-hoc code-signing the bundle (nested code first, then the app)"
+SIGN_ID="${KLOGG_SIGN_IDENTITY:--}"   # "-" = ad-hoc
+while IFS= read -r f; do
+    file "$f" 2>/dev/null | grep -q "Mach-O" || continue
+    codesign --force --timestamp=none --sign "$SIGN_ID" "$f" 2>/dev/null || true
+done < <(find "$FRAMEWORKS_DIR" "$CONTENTS/PlugIns" -type f 2>/dev/null)
+find "$FRAMEWORKS_DIR" -maxdepth 1 -name '*.framework' -print0 2>/dev/null \
+    | xargs -0 -I{} codesign --force --timestamp=none --sign "$SIGN_ID" {} 2>/dev/null || true
+codesign --force --timestamp=none --sign "$SIGN_ID" "$MACOS_DIR/KloggMac" 2>/dev/null || true
+codesign --force --timestamp=none --sign "$SIGN_ID" "$APP_BUNDLE"
+echo "==> codesign verify:"; codesign --verify --deep --strict --verbose=1 "$APP_BUNDLE" 2>&1 | tail -2 || true
+
 echo "==> Done: $APP_BUNDLE"

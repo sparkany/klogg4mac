@@ -119,6 +119,26 @@ struct KloggEngineImpl {
     std::unique_ptr<LogData>          logData;
     std::unique_ptr<LogFilteredData>  filteredData;   // created after logData
     bool                              attached = false; // a file has been attachFile'd
+    // User-forced encoding MIB (from the Encoding menu). < 0 means "auto-detect": after
+    // indexing finishes we apply the uchardet guess. >= 0 means the user pinned a codec,
+    // which we re-apply after each (re)index so the chosen encoding survives reloads.
+    int                               forcedMib = -1;
+
+    // Apply the effective display codec after indexing finishes. LogData decodes lines
+    // lazily through codec_ (default ISO-8859-1); without this, a UTF-8 file with CJK or
+    // emoji is decoded as Latin-1 and shows up as mojibake. MUST run on the Qt thread.
+    void applyDisplayEncoding() {
+        QTextCodec* codec = nullptr;
+        if ( forcedMib >= 0 ) {
+            codec = QTextCodec::codecForMib( forcedMib );
+        }
+        if ( !codec ) {
+            codec = logData->getDetectedEncoding();  // uchardet guess from indexing
+        }
+        if ( codec ) {
+            logData->setDisplayEncoding( codec->name().constData() );
+        }
+    }
 
     // --- Search-result SNAPSHOT (race-free read path) ---------------------------
     // LogFilteredData's result set (matching_lines_ / marks_and_matches_) is a CRoaring
@@ -207,6 +227,12 @@ struct KloggEngineImpl {
         _impl->context.get(),
         [weakSelf](LoadingStatus status) {
             BOOL ok = (status == LoadingStatus::Successful);
+            // Runs on the Qt thread. Apply the detected (or user-forced) display codec
+            // BEFORE notifying the delegate, so the view's first fetch decodes correctly.
+            if (ok) {
+                KloggEngine* e = weakSelf;
+                if (e && e->_impl) e->_impl->applyDisplayEncoding();
+            }
             dispatch_async(dispatch_get_main_queue(), ^{
                 KloggEngine* e = weakSelf; if (!e) return;
                 if ([e.delegate respondsToSelector:@selector(kloggEngine:loadingFinished:)])
@@ -310,6 +336,9 @@ struct KloggEngineImpl {
             // mib < 0 → auto-detect (forcedEncoding == nullptr). Otherwise look up the
             // codec by MIB; if it is unknown, fall back to auto-detect rather than crash.
             QTextCodec* codec = (mibValue >= 0) ? QTextCodec::codecForMib(mibValue) : nullptr;
+            // Remember the user's choice so applyDisplayEncoding (run on loadingFinished)
+            // pins this codec; if codecForMib didn't resolve, treat it as auto-detect.
+            impl->forcedMib = codec ? mibValue : -1;
             impl->logData->reload(codec);
         },
         Qt::QueuedConnection);

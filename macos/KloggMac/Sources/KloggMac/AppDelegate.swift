@@ -10,12 +10,23 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var windowController: MainWindowController?
+    private var isSelfTest = false
+    /// Set once a Finder/Dock open-file event has been handled, so
+    /// `applicationDidFinishLaunching` does not also restore the previous session
+    /// (which would steal focus from the file the user explicitly asked to open).
+    private var didOpenFromEvent = false
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        // Headless QA mode: introspect menus/toolbar/behavior without showing any
-        // window (see SelfTest.swift). `KloggMac --selftest [logfile]`.
-        let selfTest = CommandLine.arguments.contains("--selftest")
-        if selfTest {
+    // MARK: - Launch
+
+    // Window + menu are built in *willFinish* (not *didFinish*) so the window
+    // controller already exists when AppKit delivers a cold-launch open-file event.
+    // Finder "Open With" / drag-onto-icon dispatch `application(_:openFile:)` AFTER
+    // applicationWillFinishLaunching and BEFORE applicationDidFinishLaunching — if the
+    // controller were created in didFinish, that first file would be dropped on the
+    // floor (the symptom: double-clicking a log only launched the app empty).
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        isSelfTest = CommandLine.arguments.contains("--selftest")
+        if isSelfTest {
             NSApp.setActivationPolicy(.prohibited)
             // Route every persisted store (prefs, favorites, highlighters, filters,
             // session, color-labels, scratchpad) at a throwaway suite so the harness
@@ -35,9 +46,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Install the full klogg menu bar (Wave 2).
         AppMenu.install()
 
-        let wc = MainWindowController()
-        windowController = wc
-        if !selfTest {
+        windowController = MainWindowController()
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard let wc = windowController else { return }
+
+        if !isSelfTest {
             wc.showWindow(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
@@ -48,12 +63,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .first(where: { !$0.hasPrefix("-") && FileManager.default.fileExists(atPath: $0) })
         if let path = cliPath {
             wc.openFile(path: path)
-        } else if !selfTest && AppPreferences.shared.loadLastSession {
-            // No file on the command line: restore the previous session if enabled.
+        } else if !isSelfTest && !didOpenFromEvent && AppPreferences.shared.loadLastSession {
+            // No file on the command line and none opened via a launch event: restore
+            // the previous session if enabled.
             wc.restoreSession()
         }
 
-        if selfTest {
+        if isSelfTest {
             // Let the tab/engine settle one runloop tick, then audit and exit.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 SelfTest.run(windowController: wc)
@@ -74,11 +90,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - NSApplicationDelegate: open-file events (Finder double-click, etc.)
 
     func application(_ sender: NSApplication, openFile filename: String) -> Bool {
-        windowController?.openFile(path: filename)
+        openIncomingFile(filename)
         return true
     }
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
-        for path in filenames { windowController?.openFile(path: path) }
+        for path in filenames { openIncomingFile(path) }
+        sender.reply(toOpenOrPrint: .success)
+    }
+
+    /// Funnel for every Finder/Dock open-file event. Creates the window controller on
+    /// demand (defensive — it normally already exists from willFinishLaunching), brings
+    /// the app forward, and opens the file. Marks `didOpenFromEvent` so the launch path
+    /// skips session restore.
+    private func openIncomingFile(_ path: String) {
+        didOpenFromEvent = true
+        let wc: MainWindowController
+        if let existing = windowController {
+            wc = existing
+        } else {
+            wc = MainWindowController()
+            windowController = wc
+        }
+        if !isSelfTest {
+            wc.showWindow(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        wc.openFile(path: path)
     }
 }

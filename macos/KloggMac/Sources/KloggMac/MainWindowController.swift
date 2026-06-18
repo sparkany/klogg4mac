@@ -13,7 +13,7 @@
 import AppKit
 import KloggBridge
 
-final class MainWindowController: NSWindowController, NSDraggingDestination {
+final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Owned components
 
@@ -38,13 +38,19 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         window.center()
         super.init(window: window)
 
+        // Drag-and-drop host: a custom content view that accepts file URLs dropped
+        // anywhere on the window and opens them. (A plain NSView would just swallow the
+        // drag — the dragging-destination callbacks have to live on the view that is
+        // registered, hence FileDropView rather than the window controller.)
+        let dropView = FileDropView()
+        dropView.onDropFiles = { [weak self] urls in
+            for url in urls where url.isFileURL { self?.openFile(path: url.path) }
+        }
+        window.contentView = dropView
+
         buildContent()
         wireToolbar()
         wireTabController()
-
-        // Drag-and-drop
-        window.registerForDraggedTypes([.fileURL])
-        window.contentView?.registerForDraggedTypes([.fileURL])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
@@ -59,17 +65,39 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         // to fit the VC's minimum size, which collapses NSTabView to ~1x84).
         tabController.loadViewIfNeeded()
         let tabView = tabController.view
-        tabView.translatesAutoresizingMaskIntoConstraints = false
-        window.contentView?.addSubview(tabView)
+        // Embed the tab hierarchy with an autoresizing mask (frame-based) rather than
+        // edge constraints to the content view. This is deliberate: pinning it with
+        // constraints links the inner Auto Layout subtree's *fitting size* to the window's
+        // constraint engine, and AppKit then runs `_changeWindowFrameFromConstraintsIfNecessary`
+        // to shrink the window to that fitting width the moment a file's search bar
+        // establishes its minimum width — collapsing the window from its launch size to
+        // ~770px on open (the "width can't be resized / window jumps" bug). An autoresizing
+        // mask makes the window the size authority and keeps Auto Layout strictly inside.
         if let cv = window.contentView {
-            NSLayoutConstraint.activate([
-                tabView.topAnchor.constraint(equalTo: cv.topAnchor),
-                tabView.bottomAnchor.constraint(equalTo: cv.bottomAnchor),
-                tabView.leadingAnchor.constraint(equalTo: cv.leadingAnchor),
-                tabView.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
-            ])
+            tabView.translatesAutoresizingMaskIntoConstraints = true
+            tabView.frame = cv.bounds
+            // autoresizingMask = [] (NOT [.width,.height]): an autoresizing mask GENERATES
+            // width/height-tracking constraints, which would re-link the inner Auto Layout
+            // subtree's required minimum width to the window and let AppKit shrink-wrap the
+            // window to it. With no mask we keep tabView sized manually in windowDidResize,
+            // fully severing that path so the window's frame stays under the user's control.
+            tabView.autoresizingMask = []
+            cv.addSubview(tabView)
         }
+        window.delegate = self
         window.minSize = NSSize(width: 600, height: 400)
+    }
+
+    // Keep the (autoresizing-mask-free) tab hierarchy filling the content view. See the
+    // note in buildContent: we size it by hand precisely so Auto Layout never reaches up
+    // and resizes the window.
+    private func layoutContentToWindow() {
+        guard let cv = window?.contentView else { return }
+        tabController.view.frame = cv.bounds
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        layoutContentToWindow()
     }
 
     private func wireToolbar() {
@@ -134,30 +162,6 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         let idx = min(max(AppPreferences.shared.sessionActiveIndex, 0), paths.count - 1)
         tabController.selectTab(at: idx)
         return paths.count
-    }
-
-    // MARK: - NSDraggingDestination
-
-    func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        let board = sender.draggingPasteboard
-        guard board.canReadObject(forClasses: [NSURL.self],
-                                  options: [.urlReadingFileURLsOnly: true]) else {
-            return []
-        }
-        return .copy
-    }
-
-    func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
-
-    func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        let board = sender.draggingPasteboard
-        let opts: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
-        guard let urls = board.readObjects(forClasses: [NSURL.self], options: opts)
-                as? [URL] else { return false }
-        for url in urls where url.isFileURL {
-            openFile(path: url.path)
-        }
-        return true
     }
 
     // MARK: - Opened-files submenu (View > Opened Files)
@@ -1093,6 +1097,9 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
     func selfTestSnapshot(to path: String, size: NSSize = NSSize(width: 900, height: 500)) -> Bool {
         guard let content = window?.contentView else { return false }
         content.frame = NSRect(origin: .zero, size: size)
+        // The tab hierarchy is sized by hand (no autoresizing mask — see buildContent),
+        // so resize it to the snapshot's content bounds before laying out.
+        layoutContentToWindow()
         content.layoutSubtreeIfNeeded()
         // Force the log views + overview to fetch + lay out from the latest engine
         // state (async callbacks may not have been pumped yet), then lay out again so
@@ -1106,6 +1113,52 @@ final class MainWindowController: NSWindowController, NSDraggingDestination {
         content.cacheDisplay(in: content.bounds, to: rep)
         guard let data = rep.representation(using: .png, properties: [:]) else { return false }
         return (try? data.write(to: URL(fileURLWithPath: path))) != nil
+    }
+}
+
+// MARK: - FileDropView
+
+/// The window's content view. Accepts file URLs dropped anywhere on the window and
+/// forwards them to `onDropFiles`. The dragging-destination callbacks must live on the
+/// registered view itself (a plain NSView would accept the registration but never act
+/// on the drop), so the drop handling lives here rather than on the window controller.
+final class FileDropView: NSView {
+
+    var onDropFiles: (([URL]) -> Void)?
+
+    private static let readingOptions: [NSPasteboard.ReadingOptionKey: Any] =
+        [.urlReadingFileURLsOnly: true]
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    private func canAccept(_ sender: NSDraggingInfo) -> Bool {
+        sender.draggingPasteboard.canReadObject(
+            forClasses: [NSURL.self], options: Self.readingOptions)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        canAccept(sender) ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        canAccept(sender) ? .copy : []
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        canAccept(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let urls = sender.draggingPasteboard.readObjects(
+                forClasses: [NSURL.self], options: Self.readingOptions) as? [URL],
+              !urls.isEmpty else { return false }
+        onDropFiles?(urls)
+        return true
     }
 }
 

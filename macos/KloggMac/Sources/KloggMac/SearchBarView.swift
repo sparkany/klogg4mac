@@ -125,6 +125,21 @@ final class SearchBarView: NSView {
 
     // MARK: - Layout
 
+    /// Give a toggle button a clearly-visible on/off appearance. A plain `.rounded`
+    /// toggle barely changes between states on modern macOS (the original bug: every
+    /// search-line toggle looked identical whether checked or not). The `.recessed`
+    /// bezel draws a solid dark/tinted fill with a bold title when selected and a flat
+    /// outline when not — and it reads the button's `.state` automatically, so it stays
+    /// correct everywhere we flip state (toggles, applyFilter, setBooleanMode, …)
+    /// without per-call colour bookkeeping.
+    private func styleToggle(_ button: NSButton) {
+        button.setButtonType(.pushOnPushOff)
+        button.bezelStyle = .recessed
+        // Keep the outline visible in the off state too, so the control still reads as a
+        // tappable button (not just text) before it is engaged.
+        button.showsBorderOnlyWhileMouseInside = false
+    }
+
     private func buildSubviews() {
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -177,8 +192,7 @@ final class SearchBarView: NSView {
         // Case-insensitive toggle button (Aa).
         caseButton.translatesAutoresizingMaskIntoConstraints = false
         caseButton.title = "Aa"
-        caseButton.setButtonType(.toggle)
-        caseButton.bezelStyle = .rounded
+        styleToggle(caseButton)
         caseButton.font = .systemFont(ofSize: 11)
         caseButton.state = isCaseInsensitive ? .on : .off
         caseButton.toolTip = "Case insensitive"
@@ -189,8 +203,7 @@ final class SearchBarView: NSView {
         // Regex toggle button (.*) — klogg useRegexpButton_.
         regexButton.translatesAutoresizingMaskIntoConstraints = false
         regexButton.title = ".*"
-        regexButton.setButtonType(.toggle)
-        regexButton.bezelStyle = .rounded
+        styleToggle(regexButton)
         regexButton.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         regexButton.state = isRegex ? .on : .off
         regexButton.toolTip = "Regular expression"
@@ -202,8 +215,7 @@ final class SearchBarView: NSView {
         // filtered view shows lines that do NOT match.
         inverseButton.translatesAutoresizingMaskIntoConstraints = false
         inverseButton.title = "≠"
-        inverseButton.setButtonType(.toggle)
-        inverseButton.bezelStyle = .rounded
+        styleToggle(inverseButton)
         inverseButton.font = .systemFont(ofSize: 12)
         inverseButton.state = isInverse ? .on : .off
         inverseButton.toolTip = "Inverse match (show non-matching lines)"
@@ -215,8 +227,7 @@ final class SearchBarView: NSView {
         // is parsed as a logical expression: "foo and not(bar)", quoted sub-patterns.
         booleanButton.translatesAutoresizingMaskIntoConstraints = false
         booleanButton.title = "&|"
-        booleanButton.setButtonType(.toggle)
-        booleanButton.bezelStyle = .rounded
+        styleToggle(booleanButton)
         booleanButton.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         booleanButton.state = isBoolean ? .on : .off
         booleanButton.toolTip = "Enable regular expression logical combining"
@@ -228,8 +239,7 @@ final class SearchBarView: NSView {
         // re-runs as the file grows (with Follow).
         refreshButton.translatesAutoresizingMaskIntoConstraints = false
         refreshButton.title = "↻"
-        refreshButton.setButtonType(.toggle)
-        refreshButton.bezelStyle = .rounded
+        styleToggle(refreshButton)
         refreshButton.font = .systemFont(ofSize: 12)
         refreshButton.state = isAutoRefresh ? .on : .off
         refreshButton.toolTip = "Auto-refresh search as the file grows"
@@ -275,11 +285,25 @@ final class SearchBarView: NSView {
         let height: CGFloat = 28
         let matchTrailing = matchLabel.trailingAnchor.constraint(
             equalTo: spinner.leadingAnchor, constant: -6)
+        // The search/filter field is the one element that must absorb the bar's spare
+        // width: hug it loosely (low priority) so it grows, and resist compression so it
+        // stays usable. Everything else hugs tightly so it never steals the slack — without
+        // this the mode popup grabbed the width and the input collapsed to the bare icon.
+        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        searchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        visibilityPopup.setContentHuggingPriority(.required, for: .horizontal)
         // Let the match label shrink before the search field does.
         matchLabel.setContentHuggingPriority(.required, for: .horizontal)
         matchLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+
+        // Keep the input visibly wide. High (not required) so the window can still shrink
+        // to its minimum: when there's truly no room the field yields gracefully.
+        let searchFieldMinWidth = searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180)
+        searchFieldMinWidth.priority = .defaultHigh
+
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: height),
+            searchFieldMinWidth,
 
             // Left cluster: view-mode | Aa | .* | filters ▾
             visibilityPopup.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
